@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terralingua-launcher"
+version = "0.1.0"
+description = "Web UI that configures and launches TerraLingua simulations"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "litellm",
+    "jinja2",
+]
+
+[project.scripts]
+terralingua-launcher = "terralingua_launcher.server:main"
+
+# The package directory doubles as the project root, so it can be vendored
+# into a TerraLingua checkout (python -m terralingua_launcher just works) or
+# pip-installed standalone from this directory.
+[tool.setuptools]
+packages = ["terralingua_launcher"]
+package-dir = { "terralingua_launcher" = "." }
+
+[tool.setuptools.package-data]
+terralingua_launcher = ["static/*"]

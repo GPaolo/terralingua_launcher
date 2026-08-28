@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TerraLingua Launcher</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="bar">
+      <h1>TerraLingua <span>Launcher</span></h1>
+      <button id="target-chip" class="chip" title="Target repo & interpreter — click to change"></button>
+      <span id="key-chips" class="key-chips" title="API keys visible to the scenario designer"></span>
+      <span class="spacer"></span>
+      <span id="run-chip" class="chip run-chip hidden"></span>
+      <a id="viz-link" class="chip hidden" target="_blank" rel="noopener">📊 dashboard</a>
+      <button id="theme-toggle" title="Toggle light/dark">◐</button>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="launch" role="tab">Launch</button>
+      <button class="tab" data-tab="personas" role="tab">Personas <span id="personas-count" class="badge"></span></button>
+      <button class="tab" data-tab="artifacts" role="tab">Artifacts <span id="artifacts-count" class="badge"></span></button>
+      <button class="tab" data-tab="scenario" role="tab">Scenario AI</button>
+      <button class="tab" data-tab="console" role="tab">Console <span id="console-badge" class="badge"></span></button>
+    </nav>
+
+    <main id="main">
+      <!-- ============ LAUNCH ============ -->
+      <section id="tab-launch" class="tabpane active">
+        <div class="toolbar">
+          <input id="param-search" type="search" placeholder="Filter parameters…" />
+          <label class="check"><input type="checkbox" id="changed-only" /> changed only</label>
+          <span class="spacer"></span>
+          <select id="config-select"><option value="">Load saved config…</option></select>
+          <button id="config-reload" title="Rescan saved configs">⟳</button>
+          <button id="reset-all" class="danger-ghost" title="Reset every parameter to its default">Reset all</button>
+        </div>
+        <div id="param-groups" class="param-groups">
+          <div class="empty">Loading parameter schema from the target repo…</div>
+        </div>
+        <footer class="launchbar">
+          <div class="cmd-row">
+            <code id="cmd-preview" title="The exact command this launch runs"></code>
+            <button id="cmd-copy" title="Copy command">⧉</button>
+          </div>
+          <div class="actions">
+            <input id="config-name" type="text" placeholder="config name…" />
+            <button id="save-config">💾 Save config</button>
+            <span class="spacer"></span>
+            <label class="check"><input type="checkbox" id="opt-resume" /> resume</label>
+            <label class="check"><input type="checkbox" id="opt-viz" checked /> open dashboard</label>
+            <button id="launch-btn" class="primary">▶ Launch</button>
+          </div>
+        </footer>
+      </section>
+
+      <!-- ============ PERSONAS ============ -->
+      <section id="tab-personas" class="tabpane">
+        <div class="toolbar">
+          <select id="personas-files"><option value="">Load personas file…</option></select>
+          <button id="personas-rescan" title="Rescan repo for persona files">⟳</button>
+          <span class="spacer"></span>
+          <span id="personas-total" class="hint"></span>
+          <input id="personas-path" type="text" placeholder="save as… e.g. launcher_configs/personas.json" />
+          <button id="personas-save" class="primary-ghost">💾 Save & use</button>
+        </div>
+        <p class="hint">Personas are assigned to the initial beings in file order. <b>name</b> renames the being everywhere; <b>role</b> groups beings under a marker shape on the dashboard; <b>count</b> stamps the same persona onto several beings (extra ones get generated names).</p>
+        <div id="personas-list" class="cards"></div>
+        <button id="personas-add" class="add-btn">＋ Add persona</button>
+      </section>
+
+      <!-- ============ ARTIFACTS ============ -->
+      <section id="tab-artifacts" class="tabpane">
+        <div class="toolbar">
+          <select id="artifacts-files"><option value="">Load artifacts file…</option></select>
+          <button id="artifacts-rescan" title="Rescan repo for artifact files">⟳</button>
+          <span class="spacer"></span>
+          <input id="artifacts-path" type="text" placeholder="save as… e.g. launcher_configs/init_artifacts.json" />
+          <button id="artifacts-save" class="primary-ghost">💾 Save & use</button>
+        </div>
+        <p class="hint">Artifacts the environment seeds by itself. Placed on the map at <b>pose</b> (or a random free cell), or into inventories via <b>agent</b> / <b>role</b>. <b>step</b> delays the appearance; <b>lifespan</b> −1 lasts forever. Health centers are fixed to the map and treat their cell plus the 8 around it.</p>
+        <div id="artifacts-list" class="cards"></div>
+        <button id="artifacts-add" class="add-btn">＋ Add artifact</button>
+      </section>
+
+      <!-- ============ SCENARIO ============ -->
+      <section id="tab-scenario" class="tabpane">
+        <div class="scenario-grid">
+          <div class="scenario-input panel">
+            <h2>Describe the scenario</h2>
+            <textarea id="scenario-desc" rows="7" placeholder="e.g. A medieval river town during a cholera outbreak: a healer guild with scarce protective charms, rumor-driven funerals, a shrine that treats the sick…"></textarea>
+            <div class="designer-row">
+              <label>Model
+                <input id="designer-model" list="designer-models" spellcheck="false" />
+                <datalist id="designer-models"></datalist>
+              </label>
+              <label>API key
+                <input id="designer-key" type="password" placeholder="from environment" autocomplete="off" />
+              </label>
+              <button id="design-btn" class="primary">✦ Design scenario</button>
+            </div>
+            <div id="designer-hint" class="hint"></div>
+            <div id="design-status" class="hidden design-status"></div>
+          </div>
+
+          <div id="design-result" class="hidden">
+            <div id="design-notes" class="panel notes"></div>
+            <div id="design-issues" class="panel issues hidden"></div>
+
+            <div class="panel">
+              <h2>System prompt <span class="hint">— identity & world rules, rendered once per being</span></h2>
+              <div class="compare">
+                <div><h3>current</h3><pre id="sys-original" class="tmpl"></pre></div>
+                <div><h3>adapted <span class="hint">(editable)</span></h3><textarea id="sys-adapted" class="tmpl" rows="16" spellcheck="false"></textarea></div>
+              </div>
+            </div>
+            <div class="panel">
+              <h2>Per-step prompt <span class="hint">— observation → action, rendered every tick</span></h2>
+              <div class="compare">
+                <div><h3>current</h3><pre id="step-original" class="tmpl"></pre></div>
+                <div><h3>adapted <span class="hint">(editable)</span></h3><textarea id="step-adapted" class="tmpl" rows="16" spellcheck="false"></textarea></div>
+              </div>
+            </div>
+
+            <div class="panel two-col">
+              <div>
+                <h2>Personas <button id="apply-personas" class="mini">→ send to Personas tab</button></h2>
+                <pre id="design-personas" class="tmpl small"></pre>
+              </div>
+              <div>
+                <h2>Artifacts <button id="apply-artifacts" class="mini">→ send to Artifacts tab</button></h2>
+                <pre id="design-artifacts" class="tmpl small"></pre>
+              </div>
+            </div>
+
+            <div class="panel">
+              <h2>Suggested parameters</h2>
+              <div id="design-params" class="chips"></div>
+            </div>
+
+            <div class="panel bundlebar">
+              <input id="bundle-name" type="text" placeholder="scenario name…" />
+              <button id="bundle-save" class="primary">💾 Save bundle & use in launch</button>
+              <button id="bundle-download">⇩ Download files</button>
+              <span class="hint">Saves prompt_templates.json + personas.json + init_artifacts.json under launcher_configs/scenarios/ and points the launch fields at them.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ CONSOLE ============ -->
+      <section id="tab-console" class="tabpane">
+        <div id="proc-list" class="cards"></div>
+        <div class="panel console-panel">
+          <div class="toolbar">
+            <select id="log-select"></select>
+            <label class="check"><input type="checkbox" id="log-follow" checked /> follow</label>
+            <span class="spacer"></span>
+            <span id="log-status" class="hint"></span>
+          </div>
+          <pre id="log-view" class="log"></pre>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- settings modal -->
+  <dialog id="settings-modal">
+    <h2>Target</h2>
+    <label>TerraLingua repo <input id="set-repo" type="text" spellcheck="false" /></label>
+    <label>Python interpreter <input id="set-python" type="text" spellcheck="false" /></label>
+    <label>Dashboard port <input id="set-vizport" type="number" min="1" max="65535" /></label>
+    <div id="settings-error" class="issues hidden"></div>
+    <div class="actions">
+      <button id="settings-cancel">Cancel</button>
+      <button id="settings-save" class="primary">Save</button>
+    </div>
+  </dialog>
+
+  <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
