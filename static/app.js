@@ -664,20 +664,33 @@ function showDesign(d, issues) {
   const chips = $("#design-params");
   chips.textContent = "";
   if (!d.suggested_params.length) chips.append(el("span", { class: "hint" }, "none suggested"));
+  state.paramAppliers = [];
   for (const s of d.suggested_params) {
+    const known = !!paramByName(s.name);
+    let btn;
+    const apply = () => { // sets the value; the caller re-renders once
+      if (!known || btn.disabled) return;
+      setValue(s.name, s.value);
+      chip.classList.add("applied");
+      btn.textContent = "✓ applied";
+      btn.disabled = true;
+    };
+    btn = el("button", {
+      onclick: () => { apply(); renderParams(); },
+      title: known ? "" : "not a parameter of this TerraLingua version",
+    }, "apply");
+    btn.disabled = !known;
     const chip = el("span", { class: "pchip" },
       el("code", {}, `${s.name} = ${JSON.stringify(s.value)}`),
       el("span", { class: "why" }, s.why || ""),
-      el("button", {
-        onclick: (e) => {
-          setValue(s.name, s.value);
-          renderParams();
-          chip.classList.add("applied");
-          e.target.textContent = "✓ applied";
-        },
-      }, "apply"));
+      btn);
     chips.append(chip);
+    if (known) state.paramAppliers.push(apply);
   }
+  const allBtn = $("#apply-all-params");
+  allBtn.classList.toggle("hidden", !state.paramAppliers.length);
+  allBtn.textContent = "✓ apply all";
+  allBtn.disabled = false;
   if (!$("#bundle-name").value) {
     $("#bundle-name").value = $("#scenario-desc").value.trim().toLowerCase()
       .replace(/[^a-z0-9]+/g, "_").split("_").slice(0, 4).join("_");
@@ -1040,6 +1053,15 @@ async function boot() {
   });
 
   $("#design-btn").addEventListener("click", runDesign);
+  $("#apply-all-params").addEventListener("click", () => {
+    const n = state.paramAppliers?.length || 0;
+    (state.paramAppliers || []).forEach((apply) => apply());
+    renderParams();
+    const btn = $("#apply-all-params");
+    btn.textContent = "✓ all applied";
+    btn.disabled = true;
+    toast(`Applied ${n} suggested parameter${n === 1 ? "" : "s"} to the launch form`);
+  });
   $("#refine-btn").addEventListener("click", runRefine);
   $("#refine-undo").addEventListener("click", refineUndo);
   $("#refine-input").addEventListener("keydown", (e) => {
