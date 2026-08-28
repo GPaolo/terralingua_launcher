@@ -5,11 +5,48 @@ a form control with an ⓘ explanation, dropdowns where the config declares
 choices, persona and seeded-artifact editors, an LLM scenario designer, and
 one-click launch with the dashboard alongside.
 
+## Install
+
+Two interpreters are involved, and they don't have to be the same one:
+
+- the one **running the launcher**, which needs this package's deps
+  (`requirements.txt`);
+- the one **running TerraLingua** — the "Python interpreter" in the launcher's
+  settings — which needs TerraLingua's own deps. The launcher introspects and
+  launches the target repo with that interpreter, never its own.
+
+### Inside a TerraLingua checkout (simplest)
+
+TerraLingua's environment already contains every launcher dependency, so with
+the repo's env active and this package sitting at the checkout root:
+
 ```bash
-# from a TerraLingua checkout, with its environment active
+cd <terralingua_checkout>
 python -m terralingua_launcher            # → http://127.0.0.1:7000
-python -m terralingua_launcher --repo /path/to/other/checkout --python /path/to/python
 ```
+
+### Standalone
+
+```bash
+git clone git@github.com:GPaolo/terralingua_launcher.git
+cd terralingua_launcher
+pip install -r requirements.txt
+
+# run as a module (from the clone's parent dir)...
+cd .. && python -m terralingua_launcher \
+    --repo /path/to/terralingua --python /path/to/terralingua/env/python
+
+# ...or install it and use the console script from anywhere
+pip install ./terralingua_launcher
+terralingua-launcher --repo /path/to/terralingua --python /path/to/terralingua/env/python
+```
+
+`--repo` / `--python` are only needed the first time (or use the header target
+chip in the UI) — they persist in `~/.terralingua_launcher.json`.
+
+For the Scenario AI tab, export `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+`GEMINI_API_KEY` / `AWS_BEARER_TOKEN_BEDROCK` (or keep them in the target
+repo's `.env`, or paste a key in the tab itself).
 
 ## Independent by construction
 
