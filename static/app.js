@@ -13,6 +13,8 @@ const state = {
   artifacts: [],
   prompts: null, // originals from the target repo
   design: null, // last designer result
+  designHistory: [], // snapshots taken before each refinement, for undo
+  refineLog: [], // the feedback strings, shown as chips
   procs: [],
   logProcId: null,
   logOffset: 0,
@@ -550,6 +552,29 @@ async function initScenarioTab() {
   } catch (e) { /* ignore */ }
 }
 
+function designRequestBody() {
+  return {
+    description: $("#scenario-desc").value.trim(),
+    model: $("#designer-model").value.trim(),
+    api_key: $("#designer-key").value,
+    personas: exportPersonas(),
+    artifacts: exportArtifacts(),
+    values: state.values,
+  };
+}
+
+// the design as it stands on screen — manual textarea edits included
+function currentDesign() {
+  return {
+    sys_prompt: $("#sys-adapted").value,
+    agent_prompt: $("#step-adapted").value,
+    personas: state.design?.personas || [],
+    init_artifacts: state.design?.init_artifacts || [],
+    suggested_params: state.design?.suggested_params || [],
+    design_notes: state.design?.design_notes || "",
+  };
+}
+
 async function runDesign() {
   const desc = $("#scenario-desc").value.trim();
   if (!desc) return toast("Describe the scenario first", true);
@@ -558,23 +583,67 @@ async function runDesign() {
   $("#design-status").classList.remove("hidden");
   $("#design-status").textContent = `Asking ${$("#designer-model").value} to design the scenario — this can take a minute…`;
   try {
-    const r = await POST("/api/design", {
-      description: desc,
-      model: $("#designer-model").value.trim(),
-      api_key: $("#designer-key").value,
-      personas: exportPersonas(),
-      artifacts: exportArtifacts(),
-      values: state.values,
-    });
+    const r = await POST("/api/design", designRequestBody());
     state.design = r.result;
+    state.designHistory = [];
+    state.refineLog = [];
+    renderRefineLog();
     showDesign(r.result, r.issues);
-    toast("Scenario designed — review, edit, then save the bundle");
+    toast("Scenario designed — review, edit, refine, then save the bundle");
   } catch (e) {
     toast(`Design failed: ${e.message}`, true);
   } finally {
     btn.disabled = false;
     $("#design-status").classList.add("hidden");
   }
+}
+
+async function runRefine() {
+  const feedback = $("#refine-input").value.trim();
+  if (!feedback) return toast("Say what to change first", true);
+  if (!state.design) return;
+  const btn = $("#refine-btn");
+  btn.disabled = true;
+  $("#design-status").classList.remove("hidden");
+  $("#design-status").textContent = `Refining with ${$("#designer-model").value}…`;
+  const before = currentDesign();
+  try {
+    const r = await POST("/api/design", {
+      ...designRequestBody(),
+      feedback,
+      current: before,
+    });
+    state.designHistory.push(before);
+    state.refineLog.push(feedback);
+    state.design = r.result;
+    showDesign(r.result, r.issues);
+    $("#refine-input").value = "";
+    renderRefineLog();
+    toast("Design refined");
+  } catch (e) {
+    toast(`Refine failed: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+    $("#design-status").classList.add("hidden");
+  }
+}
+
+function refineUndo() {
+  if (!state.designHistory.length) return;
+  state.design = state.designHistory.pop();
+  state.refineLog.pop();
+  showDesign(state.design, []);
+  renderRefineLog();
+  toast("Restored the previous version");
+}
+
+function renderRefineLog() {
+  const log = $("#refine-log");
+  log.textContent = "";
+  state.refineLog.forEach((f, i) => {
+    log.append(el("span", { class: "chip", title: f }, `v${i + 2}: ${f}`));
+  });
+  $("#refine-undo").classList.toggle("hidden", !state.designHistory.length);
 }
 
 function showDesign(d, issues) {
@@ -971,6 +1040,11 @@ async function boot() {
   });
 
   $("#design-btn").addEventListener("click", runDesign);
+  $("#refine-btn").addEventListener("click", runRefine);
+  $("#refine-undo").addEventListener("click", refineUndo);
+  $("#refine-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runRefine();
+  });
   $("#designer-model").addEventListener("change", (e) => {
     POST("/api/state", { last_model: e.target.value }).catch(() => {});
   });

@@ -438,16 +438,25 @@ def create_app(repo: Path | None = None, python: str | None = None) -> FastAPI:
             if g["key"] in ("agent", "env")
         ]
         model = str(body.get("model") or designer.DEFAULT_MODEL)
+        brief = dict(
+            description=description,
+            sys_prompt=current["sys_prompt"] or "",
+            agent_prompt=current["agent_prompt"] or "",
+            personas=body.get("personas") or [],
+            artifacts=body.get("artifacts") or [],
+            param_catalog=catalog,
+        )
+        feedback = str(body.get("feedback") or "").strip()
+        current_design = body.get("current")
+        if feedback and isinstance(current_design, dict):
+            messages = designer.refine_messages(
+                **brief, current_design=current_design, feedback=feedback
+            )
+        else:
+            messages = designer.design_messages(**brief)
         try:
-            result = designer.design(
-                description=description,
-                model=model,
-                api_key=(body.get("api_key") or "").strip() or None,
-                sys_prompt=current["sys_prompt"] or "",
-                agent_prompt=current["agent_prompt"] or "",
-                personas=body.get("personas") or [],
-                artifacts=body.get("artifacts") or [],
-                param_catalog=catalog,
+            result = designer.complete(
+                messages, model, (body.get("api_key") or "").strip() or None
             )
         except Exception as e:
             raise HTTPException(502, f"designer call failed: {e}")

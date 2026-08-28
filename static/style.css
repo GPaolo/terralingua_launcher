@@ -307,6 +307,12 @@ textarea.tmpl { width: 100%; }
 .bundlebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 #bundle-name { width: 200px; }
 
+.refine-row { display: flex; gap: 10px; align-items: center; }
+#refine-input { flex: 1; }
+#refine-log { margin-bottom: 8px; }
+#refine-log:empty { display: none; }
+#refine-log .chip { max-width: 100%; white-space: normal; }
+
 /* ---------- console ---------- */
 
 #proc-list { margin-bottom: 14px; }

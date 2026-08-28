@@ -66,6 +66,16 @@ right type, each with a one-line why. Suggest only what the scenario genuinely n
 Reply with ONLY a JSON object of this exact shape (no prose outside it):
 """ + RESPONSE_SHAPE
 
+REFINE_PROMPT = """Your previous reply above is the CURRENT design state — the \
+user may have hand-edited it since, so treat it (not your memory of what you \
+sent) as the ground truth to build on. Refine it according to the feedback \
+below: change only what the feedback calls for and carry everything else over \
+unchanged. Every hard rule still applies. Reply with ONLY the complete JSON \
+object in the same shape — the full design, never a diff or a fragment.
+
+FEEDBACK:
+{feedback}"""
+
 
 def build_user_prompt(
     description: str,
@@ -201,19 +211,15 @@ def suggested_models(providers: set | None = None) -> list[str]:
     return featured + rest
 
 
-def design(
+def design_messages(
     description: str,
-    model: str,
-    api_key: str | None,
     sys_prompt: str,
     agent_prompt: str,
     personas: list,
     artifacts: list,
     param_catalog: list,
-) -> dict:
-    import litellm
-
-    messages = [
+) -> list:
+    return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
@@ -223,6 +229,31 @@ def design(
             ),
         },
     ]
+
+
+def refine_messages(
+    description: str,
+    sys_prompt: str,
+    agent_prompt: str,
+    personas: list,
+    artifacts: list,
+    param_catalog: list,
+    current_design: dict,
+    feedback: str,
+) -> list:
+    """One extra round-trip, no server-side session: the current on-screen
+    design (manual edits included) is replayed as the assistant's own turn."""
+    return design_messages(
+        description, sys_prompt, agent_prompt, personas, artifacts, param_catalog
+    ) + [
+        {"role": "assistant", "content": json.dumps(current_design, indent=1)},
+        {"role": "user", "content": REFINE_PROMPT.format(feedback=feedback)},
+    ]
+
+
+def complete(messages: list, model: str, api_key: str | None) -> dict:
+    import litellm
+
     kwargs = {
         "model": model or DEFAULT_MODEL,
         "messages": messages,

@@ -82,6 +82,10 @@ Point it at any TerraLingua checkout via the header target chip or `--repo`.
   validated (dropped placeholders, invalid artifacts, unknown params are
   flagged), and saved as a bundle under `launcher_configs/scenarios/<name>/`
   wired straight into the launch form — or downloaded as JSON files.
+  A **Refine** bar iterates on the result instead of starting over: the model
+  is replayed the design as it currently stands on screen (your manual edits
+  included) and told to change only what the feedback asks; each refinement
+  can be undone to the previous version.
 - **Console** — live tail of every launched process, stop / force-kill.
 
 Prompt overrides launch through TerraLingua's `--prompt_templates` parameter;
