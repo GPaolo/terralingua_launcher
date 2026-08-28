@@ -182,14 +182,19 @@ def _clean(result: dict) -> dict:
     }
 
 
-def suggested_models() -> list[str]:
-    """Chat-capable models litellm knows how to price/route, majors first."""
+def suggested_models(providers: set | None = None) -> list[str]:
+    """Chat-capable models litellm knows how to price/route, majors first.
+
+    With `providers`, only models of those litellm providers — the caller
+    passes the providers whose API keys are actually available."""
     import litellm
 
     models = sorted(
         name
         for name, info in litellm.model_cost.items()
-        if isinstance(info, dict) and info.get("mode") == "chat"
+        if isinstance(info, dict)
+        and info.get("mode") == "chat"
+        and (not providers or info.get("litellm_provider") in providers)
     )
     featured = [m for m in models if m.startswith(("claude", "gpt", "o3", "o4"))]
     rest = [m for m in models if m not in set(featured)]

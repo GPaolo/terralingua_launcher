@@ -25,7 +25,15 @@ from terralingua_launcher.procs import ProcRegistry
 STATIC_DIR = Path(__file__).parent / "static"
 INTROSPECT = Path(__file__).parent / "introspect.py"
 
-KEY_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")
+#: key env var -> litellm providers that key unlocks; drives both the header
+#: chips and the model-list filter on the scenario tab
+KEY_PROVIDERS = {
+    "ANTHROPIC_API_KEY": ("anthropic",),
+    "OPENAI_API_KEY": ("openai",),
+    "GEMINI_API_KEY": ("gemini",),
+    "AWS_BEARER_TOKEN_BEDROCK": ("bedrock", "bedrock_converse"),
+}
+KEY_VARS = tuple(KEY_PROVIDERS)
 
 
 def _port_open(port: int, host: str = "127.0.0.1") -> bool:
@@ -164,6 +172,35 @@ def create_app(repo: Path | None = None, python: str | None = None) -> FastAPI:
             app.state.viz_port = int(body["viz_port"])
         persist()
         return get_settings()
+
+    @app.get("/api/fs")
+    def fs_complete(prefix: str = "", dirs_only: bool = False):
+        """Path completion for the settings fields (repo / interpreter).
+        Directory and executable names only, never file contents — those two
+        fields exist to point anywhere on the local machine."""
+        raw = prefix or "~/"
+        p = Path(raw).expanduser()
+        if raw.endswith("/"):
+            base, partial = p, ""
+        else:
+            base, partial = p.parent, p.name
+        out = []
+        try:
+            for e in sorted(base.iterdir()):
+                name = e.name
+                if partial and not name.lower().startswith(partial.lower()):
+                    continue
+                if name.startswith(".") and not partial.startswith("."):
+                    continue
+                if e.is_dir():
+                    out.append(str(e) + "/")
+                elif not dirs_only and os.access(e, os.X_OK):
+                    out.append(str(e))
+                if len(out) >= 50:
+                    break
+        except OSError:
+            pass
+        return {"paths": out}
 
     @app.post("/api/state")
     def set_state(body: dict):
@@ -366,12 +403,18 @@ def create_app(repo: Path | None = None, python: str | None = None) -> FastAPI:
 
     @app.get("/api/designer/models")
     def designer_models():
+        providers = set()
+        for var, provs in KEY_PROVIDERS.items():
+            if os.environ.get(var):
+                providers.update(provs)
         try:
-            models = designer.suggested_models()
+            # no keys detected -> full catalogue (a typed key can be anything)
+            models = designer.suggested_models(providers or None)
         except Exception:
             models = []
         return {
             "models": models,
+            "filtered": bool(providers),
             "default": app.state.last_model,
             "keys": {k: bool(os.environ.get(k)) for k in KEY_VARS},
         }

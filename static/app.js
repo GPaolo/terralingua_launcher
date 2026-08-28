@@ -545,7 +545,7 @@ async function initScenarioTab() {
     if (!$("#designer-model").value) $("#designer-model").value = r.default || "claude-opus-5";
     const found = Object.entries(r.keys).filter(([, v]) => v).map(([k]) => k);
     $("#designer-hint").textContent = found.length
-      ? `Detected in environment: ${found.join(", ")} — leave the key field empty to use them. The key is used for this call only, never stored.`
+      ? `Detected in environment: ${found.join(", ")} — the list shows only models those keys can reach (any other model can still be typed, with its key pasted). Keys are used per call, never stored.`
       : "No API key detected in the environment or the repo's .env — paste one for the model's provider. Used for this call only, never stored.";
   } catch (e) { /* ignore */ }
 }
@@ -816,10 +816,12 @@ function renderHeader() {
   chip.textContent = `${s.repo_ok ? "" : "⚠ "}${repoName} · ${s.python.split("/").slice(-3).join("/")}`;
   chip.style.color = s.repo_ok && s.python_ok ? "" : "var(--status-critical)";
   const keys = $("#key-chips");
+  const chipName = (k) => k === "AWS_BEARER_TOKEN_BEDROCK"
+    ? "bedrock" : k.replace("_API_KEY", "").toLowerCase();
   keys.textContent = "";
   for (const [k, on] of Object.entries(s.keys || {})) {
     keys.append(el("span", { class: `chip ${on ? "on" : ""}`, title: on ? `${k} detected` : `${k} not set` },
-      `${on ? "✓" : "·"} ${k.replace("_API_KEY", "").toLowerCase()}`));
+      `${on ? "✓" : "·"} ${chipName(k)}`));
   }
 }
 
@@ -828,6 +830,20 @@ function switchTab(name) {
   for (const p of $$(".tabpane")) p.classList.toggle("active", p.id === `tab-${name}`);
   if (name === "scenario") initScenarioTab();
   if (name === "console") renderProcs();
+}
+
+function hookPathCompletion(inputSel, listId, dirsOnly) {
+  const input = $(inputSel);
+  const dl = el("datalist", { id: listId });
+  document.body.append(dl);
+  input.setAttribute("list", listId);
+  input.addEventListener("input", debounce(async () => {
+    try {
+      const r = await GET(`/api/fs?prefix=${encodeURIComponent(input.value)}&dirs_only=${dirsOnly}`);
+      dl.textContent = "";
+      for (const p of r.paths) dl.append(el("option", { value: p }));
+    } catch (e) { /* completion is best-effort */ }
+  }, 150));
 }
 
 function openSettings() {
@@ -893,6 +909,8 @@ async function boot() {
   $("#target-chip").addEventListener("click", openSettings);
   $("#settings-cancel").addEventListener("click", () => $("#settings-modal").close());
   $("#settings-save").addEventListener("click", saveSettings);
+  hookPathCompletion("#set-repo", "fs-repo-list", true);
+  hookPathCompletion("#set-python", "fs-python-list", false);
 
   for (const t of $$(".tab")) t.addEventListener("click", () => switchTab(t.dataset.tab));
 
