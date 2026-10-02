@@ -31,6 +31,7 @@
       <button class="tab" role="tab" type="button" id="tabLaunch" data-tab="launch" aria-controls="paneLaunch" aria-selected="true">Launch</button>
       <button class="tab" role="tab" type="button" id="tabArtifacts" data-tab="artifacts" aria-controls="paneArtifacts" aria-selected="false">Artifacts</button>
       <button class="tab" role="tab" type="button" id="tabPersonas" data-tab="personas" aria-controls="panePersonas" aria-selected="false">Personas</button>
+      <button class="tab" role="tab" type="button" id="tabDesign" data-tab="design" aria-controls="paneDesign" aria-selected="false">Scenario AI</button>
       <button class="tab" role="tab" type="button" id="tabConsole" data-tab="console" aria-controls="paneConsole" aria-selected="false">Console <span id="consoleBadge" class="badge"></span></button>
     </nav>
 
@@ -152,6 +153,82 @@
             <p class="ct-info hint"></p>
             <p class="ct-hint hint" aria-live="polite"></p>
             <div class="ct-entries"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="paneDesign" class="pane" role="tabpanel" aria-labelledby="tabDesign" data-tab="design" hidden>
+        <div class="design-grid">
+          <form id="designForm" class="panel design-form">
+            <h2>Describe the scenario</h2>
+            <p class="hint">A model writes four things from your description: the instructions text, a persona list, an artifact set, and suggested settings. It uses the current preset and your changes. You review the result, ask for changes, then apply it.</p>
+            <div class="field">
+              <label for="designDescription">Description</label>
+              <textarea id="designDescription" rows="7" placeholder="A village in a storm season. Storms hurt beings outside the shelter."></textarea>
+            </div>
+            <div class="field">
+              <label for="designModel">Model</label>
+              <input id="designModel" type="text" value="claude-opus-5-5" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="designKey">API key</label>
+              <input id="designKey" type="password" autocomplete="off" aria-describedby="designKeyHint">
+              <span id="designKeyHint" class="hint">Used for this call only. Never stored.</span>
+            </div>
+            <div class="field">
+              <label for="designName">Name</label>
+              <input id="designName" type="text" spellcheck="false" autocomplete="off" aria-describedby="designNameHint">
+              <span id="designNameHint" class="hint">The content files get this name.</span>
+            </div>
+            <div class="design-actions">
+              <button type="submit" id="designBtn" class="primary">Design</button>
+              <button type="button" id="designClear">Clear</button>
+              <span id="designStatus" class="hint" aria-live="polite"></span>
+            </div>
+            <p id="designError" class="dialog-error" role="alert" hidden></p>
+          </form>
+          <div id="designResult" class="design-result" hidden>
+            <section class="panel">
+              <h2>Design notes</h2>
+              <p id="designNotes" class="design-notes"></p>
+            </section>
+            <section class="panel">
+              <h2>Instructions</h2>
+              <label for="designInstructions" class="hint">The text for <code>agent.scenario_specific_instructions</code>. You can edit it before you apply.</label>
+              <textarea id="designInstructions" rows="12"></textarea>
+            </section>
+            <section class="panel">
+              <h2>Personas</h2>
+              <div id="designPersonas" class="design-cards"></div>
+            </section>
+            <section class="panel">
+              <h2>Artifacts</h2>
+              <div id="designArtifacts" class="design-cards"></div>
+            </section>
+            <section class="panel">
+              <h2>Suggested settings</h2>
+              <table id="designParams" class="design-table">
+                <thead><tr><th scope="col">Use</th><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Why</th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <p id="designParamsEmpty" class="hint" hidden>No suggested settings.</p>
+            </section>
+            <section id="designIssuesPanel" class="panel" hidden>
+              <h2>Problems</h2>
+              <ul id="designIssues" class="design-issues"></ul>
+            </section>
+            <section class="panel">
+              <h2>Refine or apply</h2>
+              <div class="design-refine">
+                <label for="designFeedback">Change request</label>
+                <input id="designFeedback" type="text" autocomplete="off" placeholder="Fewer farmers. One storm every ten steps.">
+                <button type="button" id="designRefine">Refine</button>
+              </div>
+              <div class="design-actions">
+                <button type="button" id="designApply" class="primary">Apply</button>
+                <span id="designApplyHint" class="hint" aria-live="polite"></span>
+              </div>
+            </section>
           </div>
         </div>
       </section>

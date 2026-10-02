@@ -84,6 +84,9 @@ const state = {
   toastTimer: null,
   content: { artifacts: newContentState(), personas: newContentState() },
   artifactTypes: { key: null, list: null, loading: false, cache: {}, seq: 0 },
+  design: null,
+  designBusy: false,
+  designNameTouched: false,
 };
 
 /* ---------------- small helpers ---------------- */
@@ -543,7 +546,7 @@ function overrideFor(path) {
   return { present: false, value: undefined };
 }
 
-function setOverride(path, value) {
+function putOverride(path, value) {
   const holder = overrideHolder(path);
   if (holder) {
     setNested(state.overrides[holder], relativeKeys(holder, path), value);
@@ -552,6 +555,10 @@ function setOverride(path, value) {
   } else {
     state.overrides[path] = value;
   }
+}
+
+function setOverride(path, value) {
+  putOverride(path, value);
   afterChange();
 }
 
@@ -1968,6 +1975,212 @@ function openContentItem(kind, name) {
   if (name) loadContentItem(kind, name);
 }
 
+/* ---------------- scenario AI: a model writes the scenario content ---------------- */
+
+const DESIGN_PARTS = { instructions: "Instructions", personas: "Personas", artifacts: "Artifacts", suggested_params: "Suggested settings" };
+
+function listOf(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function defaultDesignName(description) {
+  return description.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 3).join("_").replace(/[^a-z0-9_]/g, "");
+}
+
+function onDesignDescriptionInput() {
+  if (!state.designNameTouched) $("#designName").value = defaultDesignName($("#designDescription").value);
+  refreshDesignActions();
+}
+
+function onDesignNameInput() {
+  state.designNameTouched = $("#designName").value !== "";
+  refreshDesignActions();
+}
+
+/* The design as the page shows it now: the model's reply with the edited instructions text. */
+function currentDesign() {
+  return { ...state.design.design, instructions: $("#designInstructions").value };
+}
+
+function designIssues() {
+  return listOf(state.design?.issues);
+}
+
+/* The server's issue about one suggested setting, found by the path in its message. */
+function paramIssue(path) {
+  const found = designIssues().find((issue) => issue.where === "suggested_params"
+    && (issue.message.includes(`'${path}'`) || issue.message.includes(` ${path} `)));
+  if (found) return found;
+  return path in state.fields ? null : { where: "suggested_params", message: "This setting does not exist." };
+}
+
+function designCard(title, pairs) {
+  const list = el("dl", {});
+  for (const [term, value] of pairs) {
+    if (value === undefined || value === null || value === "") continue;
+    list.append(el("dt", {}, term), el("dd", {}, typeof value === "string" ? value : formatJson(value)));
+  }
+  return el("div", { class: "design-card" }, el("h3", {}, title), list);
+}
+
+function personaCard(entry, index) {
+  return designCard(`Persona ${index + 1}`, [["Persona", entry.persona], ["Name", entry.name], ["Count", entry.count]]);
+}
+
+function artifactCard(entry, index) {
+  const params = isPlainObject(entry.params) && Object.keys(entry.params).length ? entry.params : undefined;
+  return designCard(entry.name || `Artifact ${index + 1}`, [
+    ["Type", entry.art_type], ["Payload", entry.payload], ["Pose", entry.pose], ["Lifespan", entry.lifespan],
+    ["Movable", entry.movable === false ? "no" : "yes"], ["Params", params],
+  ]);
+}
+
+function renderDesignCards(holder, entries, toCard, emptyText) {
+  holder.textContent = "";
+  if (!entries.length) holder.append(el("p", { class: "hint" }, emptyText));
+  entries.forEach((entry, index) => holder.append(toCard(isPlainObject(entry) ? entry : {}, index)));
+}
+
+/* One table row per suggested setting. A setting with an issue is unchecked and disabled. */
+function renderDesignParams(entries, attached) {
+  const body = $("#designParams tbody");
+  body.textContent = "";
+  $("#designParams").hidden = !entries.length;
+  $("#designParamsEmpty").hidden = !!entries.length;
+  entries.forEach((raw, index) => {
+    const entry = isPlainObject(raw) ? raw : {};
+    const path = String(entry.path ?? "");
+    const issue = paramIssue(path);
+    if (issue) attached.add(issue);
+    const id = `design-param-${index}`;
+    body.append(el("tr", {},
+      el("td", {}, el("input", { type: "checkbox", id, "data-index": String(index), checked: !issue, disabled: !!issue })),
+      el("td", {}, el("label", { for: id }, el("code", {}, path))),
+      el("td", {}, el("code", {}, formatValue(entry.value))),
+      el("td", {}, entry.why || "", issue ? el("span", { class: "entry-error" }, issue.message) : null)));
+  });
+}
+
+function renderDesignIssues(attached) {
+  const list = $("#designIssues");
+  const shown = designIssues().filter((issue) => !attached.has(issue));
+  list.textContent = "";
+  $("#designIssuesPanel").hidden = !shown.length;
+  for (const issue of shown) list.append(el("li", {}, el("strong", {}, DESIGN_PARTS[issue.where] || issue.where), issue.message));
+}
+
+function renderDesign() {
+  const design = state.design?.design;
+  $("#designResult").hidden = !design;
+  if (design) {
+    $("#designNotes").textContent = typeof design.design_notes === "string" && design.design_notes ? design.design_notes : "No notes.";
+    $("#designInstructions").value = typeof design.instructions === "string" ? design.instructions : "";
+    renderDesignCards($("#designPersonas"), listOf(design.personas), personaCard, "No personas.");
+    renderDesignCards($("#designArtifacts"), listOf(design.artifacts), artifactCard, "No artifacts.");
+    const attached = new Set();
+    renderDesignParams(listOf(design.suggested_params), attached);
+    renderDesignIssues(attached);
+  }
+  refreshDesignActions();
+}
+
+function refreshDesignActions() {
+  const name = $("#designName").value.trim();
+  const blocking = designIssues().some((issue) => issue.where !== "suggested_params");
+  let reason = "";
+  if (blocking) reason = "The design has problems. Ask for changes under Refine.";
+  else if (!name) reason = "Type a name for the content files.";
+  else if (contentNameError(name)) reason = contentNameError(name);
+  else if (!$("#designInstructions").value.trim()) reason = "The instructions text is empty.";
+  $("#designBtn").disabled = state.designBusy;
+  $("#designRefine").disabled = state.designBusy || !state.design || !$("#designFeedback").value.trim();
+  $("#designApply").disabled = state.designBusy || !state.design || !!reason;
+  $("#designApplyHint").textContent = state.design ? reason : "";
+}
+
+function setDesignBusy(text) {
+  state.designBusy = !!text;
+  $("#designStatus").textContent = text;
+  refreshDesignActions();
+}
+
+function showDesignError(message) {
+  showError(message);
+  const node = $("#designError");
+  node.textContent = message;
+  node.hidden = false;
+}
+
+async function requestDesign(refine) {
+  const body = {
+    description: $("#designDescription").value,
+    model: $("#designModel").value.trim(),
+    api_key: $("#designKey").value,
+    preset: state.preset,
+    overrides: state.overrides,
+  };
+  if (refine) Object.assign(body, { previous: currentDesign(), feedback: $("#designFeedback").value.trim() });
+  $("#designError").hidden = true;
+  setDesignBusy("Asking the model… this takes a minute.");
+  try {
+    state.design = await POST("/api/design", body);
+    if (refine) $("#designFeedback").value = "";
+    renderDesign();
+  } catch (error) {
+    showDesignError(error.message);
+  } finally {
+    setDesignBusy("");
+  }
+}
+
+/* Writes the content files, then sets every override at once and evaluates once. */
+async function applyDesign() {
+  const name = $("#designName").value.trim();
+  const design = currentDesign();
+  const writes = [["instructions", design.instructions]];
+  if (listOf(design.personas).length) writes.push(["personas", design.personas]);
+  if (listOf(design.artifacts).length) writes.push(["artifacts", design.artifacts]);
+  $("#designError").hidden = true;
+  setDesignBusy("Saving the files…");
+  try {
+    const lists = await Promise.all(writes.map(([kind]) => GET(`/api/content/${kind}`)));
+    const taken = writes.filter((write, index) => lists[index].items.some((item) => item.name === name)).map(([kind]) => kind);
+    if (taken.length && !window.confirm(`"${name}" exists in ${taken.join(", ")}. Replace it?`)) return;
+    const paths = {};
+    for (const [kind, data] of writes) paths[kind] = (await api("PUT", `/api/content/${kind}/${encodeURIComponent(name)}`, { data })).path;
+    const values = { "agent.scenario_specific_instructions": paths.instructions };
+    for (const kind of Object.keys(CONTENT_KINDS)) {
+      if (paths[kind] && contentSettingKnown(kind)) values[CONTENT_KINDS[kind].setting] = paths[kind];
+    }
+    const suggested = listOf(design.suggested_params);
+    for (const box of $$("#designParams input:checked:not(:disabled)")) {
+      const entry = suggested[Number(box.dataset.index)];
+      values[entry.path] = entry.value;
+    }
+    for (const [path, value] of Object.entries(values)) {
+      delete state.jsonErrors[path];
+      putOverride(path, value);
+    }
+    afterChange();
+    toast(`Applied ${name}`);
+    switchTab("launch");
+  } catch (error) {
+    showDesignError(error.message);
+  } finally {
+    setDesignBusy("");
+  }
+}
+
+function clearDesign() {
+  if (state.design && !window.confirm("Clear the design and the description?")) return;
+  state.design = null;
+  state.designNameTouched = false;
+  $("#designForm").reset();
+  $("#designFeedback").value = "";
+  $("#designError").hidden = true;
+  renderDesign();
+}
+
 /* ---------------- console ---------------- */
 
 function statusKind(status) {
@@ -2211,6 +2424,17 @@ function bindEvents() {
     }
   });
   $("#clearLog").addEventListener("click", () => { $("#logView").textContent = ""; });
+  $("#designForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    requestDesign(false);
+  });
+  $("#designDescription").addEventListener("input", onDesignDescriptionInput);
+  $("#designName").addEventListener("input", onDesignNameInput);
+  $("#designInstructions").addEventListener("input", refreshDesignActions);
+  $("#designFeedback").addEventListener("input", refreshDesignActions);
+  $("#designRefine").addEventListener("click", () => requestDesign(true));
+  $("#designApply").addEventListener("click", applyDesign);
+  $("#designClear").addEventListener("click", clearDesign);
   for (const kind of Object.keys(CONTENT_KINDS)) {
     const nodes = contentNodes(kind);
     nodes.newButton.addEventListener("click", () => newContentItem(kind));

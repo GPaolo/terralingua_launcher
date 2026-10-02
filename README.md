@@ -46,13 +46,17 @@ Artifact sets to seed at the start of a run. Each entry has a name, a type from 
 
 Persona lists for the first beings of a run: a persona text, an optional name and a count per entry. A saved list is a JSON file under `launcher_content/personas/`. "Use in launch" points `agent.personas_path` at it. The Launch tab shows an "Edit in Artifacts" or "Edit in Personas" link under a setting that points at one of these files.
 
+**Scenario AI tab**
+
+Describe a scenario in plain language. A model writes the instructions text, a persona list, an artifact set and suggested settings, from the preset's settings and the artifact types the scenario knows. Review the result, change the text, ask for changes, then apply: the files go under `launcher_content/`, and the Launch form gets `agent.scenario_specific_instructions`, `agent.personas_path`, `env.init_artifacts_path` and the accepted settings. The model is any name `litellm` routes, `claude-opus-5-5` by default. The key comes from the environment or the working directory's `.env`; a key typed in the page is used for one call and never stored.
+
 **Console tab**
 
-Launched runs, their status, and their live output. Stop sends a termination signal; Kill forces it. Process output is kept under `<workdir>/logs/_launcher/`.
+Launched runs and scenario tools, their status, and their live output. A tool shows the address of its page. Stop sends a termination signal; Kill forces it. Process output is kept under `<workdir>/logs/_launcher/`.
 
 ## Scenario tools
 
-A scenario may ship a viewer or an anthropologist as a subpackage with that name, runnable as `python -m <scenario>.viewer --logs <folder> --port <n>`. TerraLingua reports them for a preset, and the launcher starts them on a free port through `POST /api/tools/<name>`, with the working directory's `logs/` folder.
+A scenario may ship a viewer or an anthropologist as a subpackage with that name, runnable as `python -m <scenario>.viewer --logs <folder> --port <n>`. TerraLingua reports them for a preset. The Launch tab then shows an "Open viewer" or "Open anthropologist" button, which starts the tool on a free port with the working directory's `logs/` folder and lists it in the Console with a link to its page.
 
 ## Keys
 
