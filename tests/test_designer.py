@@ -64,16 +64,19 @@ def test_problems_are_named():
     }
     issues = designer.check_design(bad, CONTEXT)
     expected = [
-        "instructions is empty", "persona 1 has no text", "persona 2 has an invalid count 0",
-        "artifact names are not unique", "artifact 1 needs a snake_case name", "artifact 1 has an unknown type 'gold'",
-        "artifact 1 has no payload", "artifact 1 needs a pose [row, col]", "artifact 1 has an invalid lifespan -2",
-        "artifact 1 has an invalid movable value", "artifact 1 has params that are not an object",
-        "artifact 2 needs a snake_case name",
-        "suggested setting 'env.nothing' does not exist", "suggested setting env.init_agents has no value",
+        ("instructions", "instructions is empty"),
+        ("personas", "persona 1 has no text"), ("personas", "persona 2 has an invalid count 0"),
+        ("artifacts", "artifact names are not unique"), ("artifacts", "artifact 1 needs a snake_case name"),
+        ("artifacts", "artifact 1 has an unknown type 'gold'"), ("artifacts", "artifact 1 has no payload"),
+        ("artifacts", "artifact 1 needs a pose [row, col]"), ("artifacts", "artifact 1 has an invalid lifespan -2"),
+        ("artifacts", "artifact 1 has an invalid movable value"), ("artifacts", "artifact 1 has params that are not an object"),
+        ("artifacts", "artifact 2 needs a snake_case name"),
+        ("suggested_params", "suggested setting 'env.nothing' does not exist"),
+        ("suggested_params", "suggested setting env.init_agents has no value"),
     ]
-    assert issues == expected
+    assert [(i["where"], i["message"]) for i in issues] == expected
     graph = {**CONTEXT, "world_type": "graph"}
-    assert "artifact 1 needs a node id as pose" in designer.check_design(GOOD, graph)
+    assert {"where": "artifacts", "message": "artifact 1 needs a node id as pose"} in designer.check_design(GOOD, graph)
 
 
 def test_the_key_follows_the_model_provider():

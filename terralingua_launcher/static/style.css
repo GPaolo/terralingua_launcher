@@ -307,7 +307,7 @@ details.group > summary .badge.changed-count { color: var(--s1); }
 .proc-label { font-weight: 600; }
 .proc-status { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
 .proc-time { color: var(--ink-muted); font-size: 12px; }
-.proc-link { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--s1); word-break: break-all; }
+.proc-link { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--s1); text-transform: none; letter-spacing: 0; word-break: break-all; }
 .proc-cmd { font-family: var(--mono); font-size: 11px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proc-actions { display: flex; gap: 6px; }
 .proc-actions button { padding: 2px 9px; font-size: 12px; }

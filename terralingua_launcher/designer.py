@@ -94,65 +94,69 @@ def parse_reply(text: str) -> dict:
     return design
 
 
-def check_design(design: dict, context: dict) -> list[str]:
-    """Problems in a design, in plain words. An empty list means it can be applied."""
-    issues = []
+def check_design(design: dict, context: dict) -> list[dict]:
+    """Problems in a design: {"where": part, "message": text}. An empty list means it can be applied."""
+    found = []
+
+    def note(part: str, message: str) -> None:
+        found.append({"where": part, "message": message})
+
     if not str(design.get("instructions") or "").strip():
-        issues.append("instructions is empty")
+        note("instructions", "instructions is empty")
     personas = design.get("personas")
     if not isinstance(personas, list):
-        issues.append("personas is not a list")
+        note("personas", "personas is not a list")
     else:
         for index, entry in enumerate(personas):
             if not isinstance(entry, dict) or not str(entry.get("persona") or "").strip():
-                issues.append(f"persona {index + 1} has no text")
+                note("personas", f"persona {index + 1} has no text")
                 continue
             count = entry.get("count", 1)
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-                issues.append(f"persona {index + 1} has an invalid count {count!r}")
+                note("personas", f"persona {index + 1} has an invalid count {count!r}")
     artifacts = design.get("artifacts")
     known = {t["name"] for t in context["artifact_types"]}
     if not isinstance(artifacts, list):
-        issues.append("artifacts is not a list")
+        note("artifacts", "artifacts is not a list")
     else:
         names = [a.get("name") for a in artifacts if isinstance(a, dict)]
         if len(names) != len(set(names)):
-            issues.append("artifact names are not unique")
+            note("artifacts", "artifact names are not unique")
         for index, entry in enumerate(artifacts):
             label = f"artifact {index + 1}"
             if not isinstance(entry, dict):
-                issues.append(f"{label} is not an object")
+                note("artifacts", f"{label} is not an object")
                 continue
             if not re.fullmatch(r"[a-z][a-z0-9_]*", str(entry.get("name") or "")):
-                issues.append(f"{label} needs a snake_case name")
+                note("artifacts", f"{label} needs a snake_case name")
             if entry.get("art_type") not in known:
-                issues.append(f"{label} has an unknown type {entry.get('art_type')!r}")
+                note("artifacts", f"{label} has an unknown type {entry.get('art_type')!r}")
             if entry.get("payload") in (None, ""):
-                issues.append(f"{label} has no payload")
+                note("artifacts", f"{label} has no payload")
             pose = entry.get("pose")
             if context["world_type"] == "grid":
                 if not (isinstance(pose, list) and len(pose) == 2 and all(isinstance(p, int) for p in pose)):
-                    issues.append(f"{label} needs a pose [row, col]")
+                    note("artifacts", f"{label} needs a pose [row, col]")
             elif not isinstance(pose, str) or not pose:
-                issues.append(f"{label} needs a node id as pose")
+                note("artifacts", f"{label} needs a node id as pose")
             lifespan = entry.get("lifespan", -1)
             if isinstance(lifespan, bool) or not isinstance(lifespan, int) or lifespan < -1:
-                issues.append(f"{label} has an invalid lifespan {lifespan!r}")
+                note("artifacts", f"{label} has an invalid lifespan {lifespan!r}")
             if not isinstance(entry.get("movable", True), bool):
-                issues.append(f"{label} has an invalid movable value")
+                note("artifacts", f"{label} has an invalid movable value")
             if not isinstance(entry.get("params", {}), dict):
-                issues.append(f"{label} has params that are not an object")
+                note("artifacts", f"{label} has params that are not an object")
     suggested = design.get("suggested_params")
     if not isinstance(suggested, list):
-        issues.append("suggested_params is not a list")
+        note("suggested_params", "suggested_params is not a list")
     else:
         for entry in suggested:
             path = entry.get("path") if isinstance(entry, dict) else None
             if path not in context["fields"]:
-                issues.append(f"suggested setting {path!r} does not exist")
+                note("suggested_params", f"suggested setting {path!r} does not exist")
             elif "value" not in entry:
-                issues.append(f"suggested setting {path} has no value")
-    return issues
+                note("suggested_params", f"suggested setting {path} has no value")
+    return found
 
 
 def litellm_complete(model: str, messages: list[dict], api_key: str | None) -> str:
