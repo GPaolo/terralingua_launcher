@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn",
     "python-dotenv",
     "pyyaml",
+    "litellm",
 ]
 
 [project.scripts]

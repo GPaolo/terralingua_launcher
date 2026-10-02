@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from terralingua_launcher import command, content, store, target
+from terralingua_launcher import command, content, designer, store, target
 from terralingua_launcher.procs import ProcRegistry
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -48,7 +48,11 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def create_app(workdir: Path | None = None, python: str | None = None, state_path: Path | None = None) -> FastAPI:
+def create_app(
+    workdir: Path | None = None, python: str | None = None, state_path: Path | None = None,
+    complete=designer.litellm_complete,
+) -> FastAPI:
+    """The app. `complete(model, messages, api_key) -> str` asks the designer's model."""
     app = FastAPI(title="TerraLingua Launcher")
     app.state.file = store.StateFile(state_path)
     state = app.state.file.load()
@@ -249,6 +253,56 @@ def create_app(workdir: Path | None = None, python: str | None = None, state_pat
     @app.get("/api/artifact_types")
     def get_artifact_types(preset: str | None = None):
         return {"types": ask(target.artifact_types, preset or None)}
+
+    # ---------- the scenario designer ----------
+
+    def file_text(value) -> str:
+        """The content of a text file named by a setting, or an empty string."""
+        if not isinstance(value, str) or not value:
+            return ""
+        path = Path(value) if Path(value).is_absolute() else app.state.workdir / value
+        try:
+            return path.read_text() if path.is_file() else ""
+        except OSError:
+            return ""
+
+    @app.post("/api/design")
+    def run_design(body: dict):
+        description = str(body.get("description") or "").strip()
+        if not description:
+            raise HTTPException(400, "describe the scenario first")
+        preset = body.get("preset") or None
+        overrides = overrides_of(body)
+        description_of_target = schema(preset)
+        fields = all_fields(description_of_target)
+        evaluated = ask(target.evaluate, preset, command.normalized(overrides))
+        if not evaluated.get("valid"):
+            raise HTTPException(400, "fix the configuration before designing: " + "; ".join(
+                d["message"] for d in evaluated.get("diagnostics", []) if d["severity"] == "error"
+            ))
+        values = {**evaluated.get("inactive_values", {}), **evaluated.get("active_values", {})}
+        instructions = values.get("agent.scenario_specific_instructions")
+        context = {
+            "world_type": values.get("env.world_type"),
+            "init_agents": values.get("env.init_agents"),
+            "fields": fields,
+            "values": values,
+            "artifact_types": ask(target.artifact_types, preset),
+            "instructions_source": instructions if isinstance(instructions, str) else "none",
+            "instructions_text": file_text(instructions),
+        }
+        model = str(body.get("model") or designer.DEFAULT_MODEL)
+        api_key = str(body.get("api_key") or "") or designer.key_for(model, app.state.env)
+        try:
+            return designer.design(
+                description, context, model, api_key, complete,
+                previous=body.get("previous") if isinstance(body.get("previous"), dict) else None,
+                feedback=str(body.get("feedback") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except Exception as exc:  # the model provider failed; its message is the useful part
+            raise HTTPException(502, f"the model call failed: {exc}") from exc
 
     # ---------- launch & processes ----------
 

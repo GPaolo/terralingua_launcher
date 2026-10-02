@@ -291,6 +291,7 @@ details.group > summary .badge.changed-count { color: var(--s1); }
   padding: 8px 10px; margin: 0; white-space: pre-wrap; word-break: break-all; max-height: 30vh; overflow-y: auto;
 }
 .side-actions { display: flex; flex-direction: column; gap: 8px; }
+.tool-buttons { display: flex; flex-direction: column; gap: 8px; }
 
 /* ---------- console ---------- */
 
@@ -306,6 +307,7 @@ details.group > summary .badge.changed-count { color: var(--s1); }
 .proc-label { font-weight: 600; }
 .proc-status { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
 .proc-time { color: var(--ink-muted); font-size: 12px; }
+.proc-link { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--s1); word-break: break-all; }
 .proc-cmd { font-family: var(--mono); font-size: 11px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proc-actions { display: flex; gap: 6px; }
 .proc-actions button { padding: 2px 9px; font-size: 12px; }

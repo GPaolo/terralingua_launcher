@@ -426,7 +426,10 @@ async function selectPreset(name, refresh = false) {
     }
     return false;
   } finally {
-    if (load === state.loadSeq) setFormBusy(false);
+    if (load === state.loadSeq) {
+      setFormBusy(false);
+      renderToolButtons();
+    }
   }
 }
 
@@ -1157,13 +1160,49 @@ async function launch() {
   try {
     const result = await POST("/api/launch", { preset: state.preset, overrides: state.overrides, resume: state.resume });
     toast(`Started ${result.proc.label}.`);
-    state.procs = [result.proc, ...state.procs.filter((p) => p.id !== result.proc.id)];
-    selectProc(result.proc.id);
-    switchTab("console");
+    showNewProc(result.proc);
   } catch (error) {
     showError(error.message);
   } finally {
     updateActionButtons();
+  }
+}
+
+function showNewProc(proc) {
+  state.procs = [proc, ...state.procs.filter((p) => p.id !== proc.id)];
+  selectProc(proc.id);
+  switchTab("console");
+}
+
+/* ---------------- scenario tools ---------------- */
+
+/* One button per tool the preset's scenario ships (viewer, anthropologist).
+   The interpreter must be usable; the configuration's validity does not matter. */
+function renderToolButtons() {
+  const holder = $("#toolButtons");
+  const tools = state.schema?.scenario?.tools || {};
+  const names = Object.keys(tools).filter((name) => tools[name]);
+  holder.textContent = "";
+  holder.hidden = !names.length;
+  for (const name of names) {
+    holder.append(el("button", {
+      type: "button",
+      disabled: !state.settings?.python_ok,
+      onclick: (event) => startTool(name, event.currentTarget),
+    }, `Open ${name}`));
+  }
+}
+
+async function startTool(name, button) {
+  button.disabled = true;
+  try {
+    const result = await POST(`/api/tools/${encodeURIComponent(name)}`, { preset: state.preset });
+    toast(`Started ${result.proc.label} at ${result.url}.`);
+    showNewProc(result.proc);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = !state.settings?.python_ok;
   }
 }
 
@@ -1953,6 +1992,10 @@ async function pollProcs() {
   renderProcs();
 }
 
+function urlLink(url) {
+  return el("a", { class: "proc-link", href: url, target: "_blank", rel: "noopener", title: "Opens in a new tab" }, url);
+}
+
 function procNode(proc) {
   let node = state.procNodes.get(proc.id);
   if (node) return node;
@@ -1964,7 +2007,7 @@ function procNode(proc) {
   const label = el("span", { class: "proc-label" });
   const cmd = el("code", { class: "proc-cmd" });
   const li = el("li", { class: "proc", "data-id": String(proc.id) },
-    el("div", { class: "proc-head" }, dot, label, status, time),
+    el("div", { class: "proc-head" }, dot, label, status, time, proc.url ? urlLink(proc.url) : null),
     cmd,
     el("div", { class: "proc-actions" },
       el("button", { type: "button", onclick: () => selectProc(proc.id) }, "View log"),
@@ -2022,7 +2065,9 @@ function selectProc(id) {
   $("#logView").textContent = "";
   $("#logStatus").textContent = "";
   const proc = state.procs.find((p) => p.id === id);
-  $("#logTitle").textContent = proc ? `Log of ${proc.label}` : "Log";
+  const title = $("#logTitle");
+  title.textContent = proc ? `Log of ${proc.label}` : "Log";
+  if (proc?.url) title.append(" ", urlLink(proc.url));
   renderProcs();
   pollLog();
 }
