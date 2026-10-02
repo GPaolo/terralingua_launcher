@@ -1,196 +1,150 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TerraLingua Launcher</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="app">
+    <div id="errorBar" class="error-bar" aria-live="polite" hidden>
+      <strong>Error</strong>
+      <span id="errorText"></span>
+      <button id="errorDismiss" type="button" aria-label="Dismiss this error">&times;</button>
+    </div>
+
     <header class="bar">
       <h1>TerraLingua <span>Launcher</span></h1>
-      <button id="target-chip" class="chip" title="Target repo & interpreter — click to change"></button>
-      <span id="key-chips" class="key-chips" title="API keys visible to the scenario designer"></span>
+      <dl class="target">
+        <div><dt>Working directory</dt><dd id="hdrWorkdir" class="mono"></dd></div>
+        <div><dt>Interpreter</dt><dd id="hdrPython" class="mono"></dd></div>
+        <div><dt>TerraLingua</dt><dd id="hdrTlVersion" class="mono"></dd></div>
+        <div><dt>Launcher</dt><dd id="hdrLauncherVersion" class="mono"></dd></div>
+      </dl>
+      <div id="keyChips" class="key-chips" role="list" aria-label="API keys"></div>
       <span class="spacer"></span>
-      <span id="run-chip" class="chip run-chip hidden"></span>
-      <a id="viz-link" class="chip hidden" target="_blank" rel="noopener">📊 dashboard</a>
-      <button id="theme-toggle" title="Toggle light/dark">◐</button>
+      <button id="settingsBtn" type="button">Settings</button>
     </header>
 
-    <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="launch" role="tab">Launch</button>
-      <button class="tab" data-tab="personas" role="tab">Personas <span id="personas-count" class="badge"></span></button>
-      <button class="tab" data-tab="artifacts" role="tab">Artifacts <span id="artifacts-count" class="badge"></span></button>
-      <button class="tab" data-tab="scenario" role="tab">Scenario AI</button>
-      <button class="tab" data-tab="console" role="tab">Console <span id="console-badge" class="badge"></span></button>
+    <nav class="tabs" role="tablist" aria-label="Pages">
+      <button class="tab" role="tab" type="button" id="tabLaunch" data-tab="launch" aria-controls="paneLaunch" aria-selected="true">Launch</button>
+      <button class="tab" role="tab" type="button" id="tabConsole" data-tab="console" aria-controls="paneConsole" aria-selected="false">Console <span id="consoleBadge" class="badge"></span></button>
     </nav>
 
     <main id="main">
-      <!-- ============ LAUNCH ============ -->
-      <section id="tab-launch" class="tabpane active">
-        <div class="toolbar">
-          <input id="param-search" type="search" placeholder="Filter parameters…" />
-          <label class="check"><input type="checkbox" id="changed-only" /> changed only</label>
-          <span class="spacer"></span>
-          <select id="config-select"><option value="">Load saved config…</option></select>
-          <button id="config-reload" title="Rescan saved configs">⟳</button>
-          <button id="reset-all" class="danger-ghost" title="Reset every parameter to its default">Reset all</button>
-        </div>
-        <div id="param-groups" class="param-groups">
-          <div class="empty">Loading parameter schema from the target repo…</div>
-        </div>
-        <footer class="launchbar">
-          <div class="cmd-row">
-            <code id="cmd-preview" title="The exact command this launch runs"></code>
-            <button id="cmd-copy" title="Copy command">⧉</button>
+      <section id="paneLaunch" class="pane" role="tabpanel" aria-labelledby="tabLaunch">
+        <div class="launch-grid">
+          <div class="form-column">
+            <div class="toolbar panel">
+              <div class="toolbar-row">
+                <label for="presetSelect">Preset</label>
+                <select id="presetSelect"></select>
+                <span class="spacer"></span>
+                <button id="resetAll" type="button" class="danger-ghost">Reset all changes</button>
+              </div>
+              <p id="presetInfo" class="hint"></p>
+              <div class="toolbar-row">
+                <input id="searchBox" type="search" placeholder="Search settings" aria-label="Search settings by name, path, or description">
+                <label class="switch-label">
+                  <span class="switch"><input type="checkbox" id="showInactive" role="switch"><span class="track" aria-hidden="true"></span></span>
+                  <span id="showInactiveText">Show inactive settings (0)</span>
+                </label>
+                <label class="switch-label">
+                  <span class="switch"><input type="checkbox" id="resumeSwitch" role="switch"><span class="track" aria-hidden="true"></span></span>
+                  <span>Resume from the latest checkpoint</span>
+                </label>
+              </div>
+            </div>
+            <div id="form" class="form" aria-busy="true">
+              <p class="empty">Loading settings…</p>
+            </div>
           </div>
-          <div class="actions">
-            <input id="config-name" type="text" placeholder="config name…" />
-            <button id="save-config">💾 Save config</button>
-            <span class="spacer"></span>
-            <label class="check"><input type="checkbox" id="opt-resume" /> resume</label>
-            <label class="check"><input type="checkbox" id="opt-viz" checked /> open dashboard</label>
-            <button id="launch-btn" class="primary">▶ Launch</button>
+
+          <aside class="side-column">
+            <section class="panel">
+              <h2>Diagnostics</h2>
+              <ul id="diagnostics" class="diag-list" aria-live="polite"></ul>
+              <p id="statesNote" class="hint" hidden>Field states are from the last valid check.</p>
+            </section>
+            <section class="panel">
+              <h2>Effective settings</h2>
+              <dl id="derived" class="derived"></dl>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h2>Command</h2>
+                <button id="copyCmd" type="button" class="mini">Copy</button>
+              </div>
+              <pre id="cmdPreview" class="cmd" tabindex="0" aria-label="Command line preview"></pre>
+            </section>
+            <div class="side-actions">
+              <button id="savePresetBtn" type="button" disabled>Save as preset</button>
+              <button id="launchBtn" type="button" class="primary big" disabled>Launch</button>
+              <p id="launchHint" class="hint" aria-live="polite"></p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="paneConsole" class="pane" role="tabpanel" aria-labelledby="tabConsole" hidden>
+        <div class="console-grid">
+          <div class="proc-column panel">
+            <h2>Processes</h2>
+            <ul id="procList" class="proc-list"></ul>
           </div>
-        </footer>
-      </section>
-
-      <!-- ============ PERSONAS ============ -->
-      <section id="tab-personas" class="tabpane">
-        <div class="toolbar">
-          <select id="personas-files"><option value="">Load personas file…</option></select>
-          <button id="personas-rescan" title="Rescan repo for persona files">⟳</button>
-          <span class="spacer"></span>
-          <span id="personas-total" class="hint"></span>
-          <input id="personas-path" type="text" placeholder="save as… e.g. launcher_configs/personas.json" />
-          <button id="personas-save" class="primary-ghost">💾 Save & use</button>
-        </div>
-        <p class="hint">Personas are assigned to the initial beings in file order. <b>name</b> renames the being everywhere; <b>role</b> groups beings under a marker shape on the dashboard; <b>count</b> stamps the same persona onto several beings (extra ones get generated names).</p>
-        <div id="personas-list" class="cards"></div>
-        <button id="personas-add" class="add-btn">＋ Add persona</button>
-      </section>
-
-      <!-- ============ ARTIFACTS ============ -->
-      <section id="tab-artifacts" class="tabpane">
-        <div class="toolbar">
-          <select id="artifacts-files"><option value="">Load artifacts file…</option></select>
-          <button id="artifacts-rescan" title="Rescan repo for artifact files">⟳</button>
-          <span class="spacer"></span>
-          <input id="artifacts-path" type="text" placeholder="save as… e.g. launcher_configs/init_artifacts.json" />
-          <button id="artifacts-save" class="primary-ghost">💾 Save & use</button>
-        </div>
-        <p class="hint">Artifacts the environment seeds by itself. Placed on the map at <b>pose</b> (or a random free cell), or into inventories via <b>agent</b> / <b>role</b>. <b>step</b> delays the appearance; <b>lifespan</b> −1 lasts forever. Health centers are fixed to the map and treat their cell plus the 8 around it.</p>
-        <div id="artifacts-list" class="cards"></div>
-        <button id="artifacts-add" class="add-btn">＋ Add artifact</button>
-      </section>
-
-      <!-- ============ SCENARIO ============ -->
-      <section id="tab-scenario" class="tabpane">
-        <div class="scenario-grid">
-          <div class="scenario-input panel">
-            <h2>Describe the scenario</h2>
-            <textarea id="scenario-desc" rows="7" placeholder="e.g. A medieval river town during a cholera outbreak: a healer guild with scarce protective charms, rumor-driven funerals, a shrine that treats the sick…"></textarea>
-            <div class="designer-row">
-              <label>Model
-                <input id="designer-model" list="designer-models" spellcheck="false" />
-                <datalist id="designer-models"></datalist>
+          <div class="log-column panel">
+            <div class="toolbar-row">
+              <h2 id="logTitle">Log</h2>
+              <span id="logStatus" class="hint"></span>
+              <span class="spacer"></span>
+              <label class="switch-label">
+                <span class="switch"><input type="checkbox" id="followSwitch" role="switch" checked><span class="track" aria-hidden="true"></span></span>
+                <span>Scroll to new output</span>
               </label>
-              <label>API key
-                <input id="designer-key" type="password" placeholder="from environment" autocomplete="off" />
-              </label>
-              <button id="design-btn" class="primary">✦ Design scenario</button>
+              <button id="clearLog" type="button">Clear</button>
             </div>
-            <div id="designer-hint" class="hint"></div>
-            <div id="design-status" class="hidden design-status"></div>
+            <pre id="logView" class="log" tabindex="0" aria-label="Process log output"></pre>
           </div>
-
-          <div id="design-result" class="hidden">
-            <div id="design-notes" class="panel notes"></div>
-            <div id="design-issues" class="panel issues hidden"></div>
-
-            <div class="panel">
-              <h2>System prompt <span class="hint">— identity & world rules, rendered once per being</span></h2>
-              <div class="compare">
-                <div><h3>current</h3><pre id="sys-original" class="tmpl"></pre></div>
-                <div><h3>adapted <span class="hint">(editable)</span></h3><textarea id="sys-adapted" class="tmpl" rows="16" spellcheck="false"></textarea></div>
-              </div>
-            </div>
-            <div class="panel">
-              <h2>Per-step prompt <span class="hint">— observation → action, rendered every tick</span></h2>
-              <div class="compare">
-                <div><h3>current</h3><pre id="step-original" class="tmpl"></pre></div>
-                <div><h3>adapted <span class="hint">(editable)</span></h3><textarea id="step-adapted" class="tmpl" rows="16" spellcheck="false"></textarea></div>
-              </div>
-            </div>
-
-            <div class="panel two-col">
-              <div>
-                <h2>Personas <button id="apply-personas" class="mini">→ send to Personas tab</button></h2>
-                <pre id="design-personas" class="tmpl small"></pre>
-              </div>
-              <div>
-                <h2>Artifacts <button id="apply-artifacts" class="mini">→ send to Artifacts tab</button></h2>
-                <pre id="design-artifacts" class="tmpl small"></pre>
-              </div>
-            </div>
-
-            <div class="panel">
-              <h2>Suggested parameters <button id="apply-all-params" class="mini hidden">✓ apply all</button></h2>
-              <div id="design-params" class="chips"></div>
-            </div>
-
-            <div class="panel refinebar">
-              <h2>Refine <span class="hint">— iterate on this design instead of starting over; your manual edits above are kept</span></h2>
-              <div id="refine-log" class="chips"></div>
-              <div class="refine-row">
-                <input id="refine-input" type="text" placeholder="e.g. fewer healers and make them fearful; write the artifacts in older language; double the shrine's radius…" />
-                <button id="refine-btn" class="primary-ghost">✦ Refine</button>
-                <button id="refine-undo" class="hidden" title="Restore the design as it was before the last refinement">↩ previous version</button>
-              </div>
-            </div>
-
-            <div class="panel bundlebar">
-              <input id="bundle-name" type="text" placeholder="scenario name…" />
-              <button id="bundle-save" class="primary">💾 Save bundle & use in launch</button>
-              <button id="bundle-download">⇩ Download files</button>
-              <span class="hint">Saves prompt_templates.json + personas.json + init_artifacts.json under launcher_configs/scenarios/ and points the launch fields at them.</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ============ CONSOLE ============ -->
-      <section id="tab-console" class="tabpane">
-        <div id="proc-list" class="cards"></div>
-        <div class="panel console-panel">
-          <div class="toolbar">
-            <select id="log-select"></select>
-            <label class="check"><input type="checkbox" id="log-follow" checked /> follow</label>
-            <span class="spacer"></span>
-            <span id="log-status" class="hint"></span>
-          </div>
-          <pre id="log-view" class="log"></pre>
         </div>
       </section>
     </main>
   </div>
 
-  <!-- settings modal -->
-  <dialog id="settings-modal">
-    <h2>Target</h2>
-    <label>TerraLingua repo <input id="set-repo" type="text" spellcheck="false" /></label>
-    <label>Python interpreter <input id="set-python" type="text" spellcheck="false" /></label>
-    <label>Dashboard port <input id="set-vizport" type="number" min="1" max="65535" /></label>
-    <div id="settings-error" class="issues hidden"></div>
-    <div class="actions">
-      <button id="settings-cancel">Cancel</button>
-      <button id="settings-save" class="primary">Save</button>
-    </div>
+  <dialog id="settingsDialog" aria-labelledby="settingsTitle">
+    <form method="dialog" id="settingsForm">
+      <h2 id="settingsTitle">Settings</h2>
+      <label for="settingsWorkdir">Working directory</label>
+      <input id="settingsWorkdir" type="text" list="workdirList" spellcheck="false" autocomplete="off">
+      <datalist id="workdirList"></datalist>
+      <label for="settingsPython">Python interpreter</label>
+      <input id="settingsPython" type="text" list="pythonList" spellcheck="false" autocomplete="off">
+      <datalist id="pythonList"></datalist>
+      <p id="settingsError" class="dialog-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="settingsCancel">Cancel</button>
+        <button type="submit" id="settingsSave" class="primary">Save</button>
+      </div>
+    </form>
   </dialog>
 
-  <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
-  <div id="toast" class="toast hidden"></div>
+  <dialog id="savePresetDialog" aria-labelledby="savePresetTitle">
+    <form method="dialog" id="savePresetForm">
+      <h2 id="savePresetTitle">Save as preset</h2>
+      <p class="hint">The current preset and your changes become a new preset file in the working directory.</p>
+      <label for="savePresetName">Name</label>
+      <input id="savePresetName" type="text" required spellcheck="false" autocomplete="off">
+      <label for="savePresetDescription">Description</label>
+      <textarea id="savePresetDescription" rows="2"></textarea>
+      <p id="savePresetError" class="dialog-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="savePresetCancel">Cancel</button>
+        <button type="submit" id="savePresetConfirm" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="/static/app.js"></script>
 </body>

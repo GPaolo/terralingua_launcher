@@ -1,1105 +1,1424 @@
-/* TerraLingua launcher UI. Plain JS, no build step (same approach as viz/). */
+/* TerraLingua launcher front-end. Plain JavaScript, no build step. */
 
 "use strict";
 
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+const SCENARIO_PREFIX = "run.scenario_options.";
+const SCENARIO_GROUP = "Scenario options";
+const EVALUATE_DELAY = 400;
+const PERSIST_DELAY = 500;
+const LONG_TEXT = 80;
+const LOG_LIMIT = 400000;
+const LOG_KEEP = 300000;
+
+const DERIVED_LABELS = {
+  artifact_creation_enabled: "Artifact creation",
+  internal_memory_enabled: "Internal memory",
+  energy_death: "Death at zero energy",
+  reproduction_enabled: "Reproduction",
+  newborn_base_energy: "Newborn base energy",
+  failed_birth_cost: "Failed birth cost",
+  hop_radius: "Hop radius",
+};
 
 const state = {
   settings: null,
+  presets: [],
+  preset: null,
+  overrides: {},
+  resume: false,
   schema: null,
-  values: {}, // param name -> value (only user-touched entries)
-  personas: [],
-  artifacts: [],
-  prompts: null, // originals from the target repo
-  design: null, // last designer result
-  designHistory: [], // snapshots taken before each refinement, for undo
-  refineLog: [], // the feedback strings, shown as chips
+  schemaCache: {},
+  fields: {},
+  base: {},
+  evaluation: null,
+  diagnostics: [],
+  loadSeq: 0,
+  evalSeq: 0,
+  evalPending: false,
+  evalValid: false,
+  previewSeq: 0,
+  showInactive: false,
+  search: "",
+  pinned: null,
+  jsonErrors: {},
+  rows: {},
+  sections: [],
   procs: [],
-  logProcId: null,
+  procNodes: new Map(),
+  selectedProc: null,
+  logSeq: 0,
   logOffset: 0,
-  configPaths: {}, // name -> path for saved-config loading
+  logBusy: false,
+  logDone: false,
+  logError: null,
+  pollError: null,
+  follow: true,
+  tab: "launch",
+  toastTimer: null,
 };
 
-/* ---------------- helpers ---------------- */
+/* ---------------- small helpers ---------------- */
 
-async function api(method, url, body) {
-  const opts = { method, headers: {} };
-  if (body !== undefined) {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch (e) { /* ignore */ }
-    throw new Error(detail);
-  }
-  return res.json();
-}
-const GET = (url) => api("GET", url);
-const POST = (url, body) => api("POST", url, body);
-
-let toastTimer = null;
-function toast(msg, isErr = false) {
-  const el = $("#toast");
-  el.textContent = msg;
-  el.classList.toggle("err", isErr);
-  el.classList.remove("hidden");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add("hidden"), isErr ? 6000 : 3000);
-}
-
-function debounce(fn, ms) {
-  let t;
-  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
-}
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") node.className = v;
-    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else if (v !== null && v !== undefined) node.setAttribute(k, v);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : String(value));
   }
-  for (const c of children) {
-    if (c === null || c === undefined) continue;
-    node.append(c.nodeType ? c : document.createTextNode(c));
+  for (const child of children) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child.nodeType ? child : document.createTextNode(String(child)));
   }
   return node;
 }
 
-/* ---------------- params ---------------- */
-
-function allParams() {
-  return (state.schema?.groups || []).flatMap((g) => g.params);
-}
-function paramByName(name) {
-  return allParams().find((p) => p.name === name);
+function setAttr(node, name, value) {
+  if (value === null || value === undefined || value === false) node.removeAttribute(name);
+  else node.setAttribute(name, value === true ? "" : String(value));
 }
 
-function currentValue(p) {
-  return p.name in state.values ? state.values[p.name] : p.default;
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
 }
 
-function isChanged(p) {
-  if (!(p.name in state.values)) return false;
-  const v = state.values[p.name];
-  if (v === null || v === "" || v === undefined) return false;
-  if (Array.isArray(p.default) || Array.isArray(v)) {
-    return JSON.stringify(v) !== JSON.stringify(p.default);
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameValue(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function plural(count, singular, pluralForm) {
+  return `${count} ${count === 1 ? singular : pluralForm}`;
+}
+
+function formatValue(value) {
+  return value === undefined ? "none" : JSON.stringify(value);
+}
+
+function formatJson(value) {
+  const text = JSON.stringify(value);
+  return text.length > 60 ? JSON.stringify(value, null, 2) : text;
+}
+
+function humanize(key) {
+  const text = key.replace(/_/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function formatTime(seconds) {
+  const date = new Date(seconds * 1000);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return sameDay ? date.toLocaleTimeString() : date.toLocaleString();
+}
+
+function walk(object, keys) {
+  let cursor = object;
+  for (const key of keys) {
+    if (!isPlainObject(cursor) || !(key in cursor)) return { ok: false, value: undefined };
+    cursor = cursor[key];
   }
-  return v !== p.default;
+  return { ok: true, value: cursor };
 }
 
-function setValue(name, value) {
-  const p = paramByName(name);
-  if (value === "" || value === null || value === undefined ||
-      (p && !Array.isArray(value) && value === p.default)) {
-    delete state.values[name];
-  } else {
-    state.values[name] = value;
+function setNested(object, keys, value) {
+  let cursor = object;
+  for (const key of keys.slice(0, -1)) {
+    if (!isPlainObject(cursor[key])) cursor[key] = {};
+    cursor = cursor[key];
   }
-  onValuesChanged();
+  cursor[keys[keys.length - 1]] = value;
 }
 
-const persistValues = debounce(() => {
-  POST("/api/state", { last_values: state.values }).catch(() => {});
-}, 800);
+function deleteNested(object, keys) {
+  const found = walk(object, keys.slice(0, -1));
+  if (found.ok && isPlainObject(found.value)) delete found.value[keys[keys.length - 1]];
+}
 
-const refreshPreview = debounce(async () => {
+/* ---------------- server calls, errors, toasts ---------------- */
+
+async function api(method, url, body) {
+  const options = { method, headers: {} };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  let response;
   try {
-    const r = await POST("/api/preview", {
-      values: state.values,
-      resume: $("#opt-resume").checked,
-    });
-    $("#cmd-preview").textContent = r.cmd;
-  } catch (e) { /* schema not ready */ }
-}, 350);
-
-function onValuesChanged() {
-  persistValues();
-  refreshPreview();
-  // cheap re-style without a full rebuild
-  for (const row of $$(".param")) {
-    const p = paramByName(row.dataset.name);
-    if (p) row.classList.toggle("changed", isChanged(p));
+    response = await fetch(url, options);
+  } catch (error) {
+    const failure = new Error(`The server did not answer (${error.message}).`);
+    failure.status = 0;
+    throw failure;
   }
-  for (const g of state.schema?.groups || []) {
-    const badge = $(`#gbadge-${g.key}`);
-    if (badge) {
-      const n = g.params.filter(isChanged).length;
-      badge.textContent = n ? `${n} changed` : "";
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const data = await response.json();
+      if (data.detail) detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+    } catch (error) {
+      /* no JSON body: keep the status text */
     }
+    const failure = new Error(detail);
+    failure.status = response.status;
+    throw failure;
+  }
+  return response.json();
+}
+
+const GET = (url) => api("GET", url);
+const POST = (url, body) => api("POST", url, body ?? {});
+
+function showError(message) {
+  $("#errorText").textContent = message;
+  $("#errorBar").hidden = false;
+}
+
+function hideError() {
+  $("#errorBar").hidden = true;
+}
+
+function toast(message) {
+  const node = $("#toast");
+  node.textContent = message;
+  node.hidden = false;
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => { node.hidden = true; }, 2500);
+}
+
+/* ---------------- header and settings ---------------- */
+
+function keyLabel(name) {
+  return name === "AWS_BEARER_TOKEN_BEDROCK" ? "bedrock" : name.replace("_API_KEY", "").toLowerCase();
+}
+
+function renderHeader() {
+  const settings = state.settings;
+  if (!settings) return;
+  const workdir = $("#hdrWorkdir");
+  workdir.textContent = settings.workdir;
+  workdir.title = settings.workdir_ok ? settings.workdir : `${settings.workdir} is not a folder`;
+  workdir.classList.toggle("bad", !settings.workdir_ok);
+  const python = $("#hdrPython");
+  python.textContent = settings.python;
+  python.title = settings.python_ok ? settings.python : `${settings.python} was not found`;
+  python.classList.toggle("bad", !settings.python_ok);
+  const version = $("#hdrTlVersion");
+  version.textContent = settings.terralingua_version || "not installed";
+  version.classList.toggle("bad", !settings.terralingua_version);
+  $("#hdrLauncherVersion").textContent = settings.launcher_version || "";
+  const chips = $("#keyChips");
+  chips.textContent = "";
+  for (const [name, isSet] of Object.entries(settings.keys || {})) {
+    chips.append(el("span", {
+      class: `chip${isSet ? " on" : ""}`,
+      role: "listitem",
+      title: `${name} is ${isSet ? "set" : "not set"}`,
+    }, `${keyLabel(name)} ${isSet ? "set" : "not set"}`));
   }
 }
 
-const WIDE_PARAMS = new Set([
-  "exp_name", "exp_description", "personas", "init_artifacts",
-  "prompt_templates", "save_root", "model", "agents_name_prefix",
-]);
-
-function makeControl(p) {
-  const val = currentValue(p);
-  if (p.type === "bool") {
-    const input = el("input", {
-      type: "checkbox",
-      onchange: (e) => setValue(p.name, e.target.checked),
-    });
-    input.checked = !!val;
-    return el("span", { class: "switch" }, input, el("span", { class: "track" }));
-  }
-  if (p.choices && p.choices.length) {
-    const sel = el("select", { onchange: (e) => setValue(p.name, e.target.value) });
-    for (const c of p.choices) sel.append(el("option", { value: c }, String(c)));
-    sel.value = String(val ?? p.choices[0]);
-    return sel;
-  }
-  if ((p.type === "int" || p.type === "float") && !p.nargs && !p.autocoerce) {
-    const input = el("input", {
-      type: "number",
-      step: p.type === "int" ? "1" : "any",
-      onchange: (e) => {
-        const raw = e.target.value;
-        if (raw === "") return setValue(p.name, "");
-        const n = p.type === "int" ? parseInt(raw, 10) : parseFloat(raw);
-        setValue(p.name, Number.isNaN(n) ? "" : n);
-      },
-    });
-    input.value = val === null || val === undefined ? "" : val;
-    input.placeholder = p.default === null ? "" : String(p.default);
-    return input;
-  }
-  // strings, nargs lists and autocoerced values: free text
-  const input = el("input", {
-    type: "text",
-    class: WIDE_PARAMS.has(p.name) ? "wide" : "",
-    onchange: (e) => setValue(p.name, e.target.value),
-    spellcheck: "false",
-  });
-  if (p.name === "model" && state.schema.extras?.model_suggestions) {
-    input.setAttribute("list", "model-suggestions");
-  }
-  const display = Array.isArray(val) ? val.join(" ") : val;
-  input.value = display === null || display === undefined ? "" : display;
-  input.placeholder = Array.isArray(p.default)
-    ? p.default.join(" ")
-    : p.default === null ? "—" : String(p.default);
-  return input;
+function openSettings() {
+  const settings = state.settings || {};
+  $("#settingsWorkdir").value = settings.workdir || "";
+  $("#settingsPython").value = settings.python || "";
+  $("#settingsError").hidden = true;
+  $("#settingsDialog").showModal();
 }
 
-function renderParams() {
-  const root = $("#param-groups");
-  root.textContent = "";
-  const schema = state.schema;
-  if (!schema || schema.errors?.length && !schema.groups?.length) {
-    root.append(el("div", { class: "empty" },
-      "Could not read the parameter schema: " + (schema?.errors || []).join("; ")));
+async function saveSettings(event) {
+  event.preventDefault();
+  const errorNode = $("#settingsError");
+  const saveButton = $("#settingsSave");
+  saveButton.disabled = true;
+  try {
+    state.settings = await POST("/api/settings", {
+      workdir: $("#settingsWorkdir").value.trim(),
+      python: $("#settingsPython").value.trim(),
+    });
+    $("#settingsDialog").close();
+    renderHeader();
+    state.schemaCache = {};
+    await loadPresets();
+    const preset = state.presets.some((p) => p.name === state.preset) ? state.preset : null;
+    await selectPreset(preset, true);
+    persistState();
+  } catch (error) {
+    errorNode.textContent = error.message;
+    errorNode.hidden = false;
+  } finally {
+    saveButton.disabled = false;
+  }
+}
+
+function bindPathCompletion(input, list, dirsOnly) {
+  input.addEventListener("input", debounce(async () => {
+    try {
+      const result = await GET(`/api/fs?prefix=${encodeURIComponent(input.value)}&dirs_only=${dirsOnly}`);
+      list.textContent = "";
+      for (const path of result.paths) list.append(el("option", { value: path }));
+    } catch (error) {
+      showError(error.message);
+    }
+  }, 150));
+}
+
+/* ---------------- presets ---------------- */
+
+async function loadPresets() {
+  try {
+    state.presets = (await GET("/api/presets")).presets;
+  } catch (error) {
+    state.presets = [];
+    showError(error.message);
+  }
+  renderPresetOptions();
+}
+
+function renderPresetOptions() {
+  const select = $("#presetSelect");
+  select.textContent = "";
+  select.append(el("option", { value: "" }, "No preset (defaults only)"));
+  for (const preset of state.presets) {
+    const description = preset.description || "";
+    const short = description.length > 70 ? `${description.slice(0, 67)}…` : description;
+    select.append(el("option", { value: preset.name, title: `${description} (${preset.location})` },
+      short ? `${preset.name} — ${short}` : preset.name));
+  }
+  select.value = state.preset || "";
+  renderPresetInfo();
+}
+
+function renderPresetInfo() {
+  const info = $("#presetInfo");
+  const preset = state.presets.find((p) => p.name === state.preset);
+  if (preset) {
+    info.textContent = `${preset.description || "No description."} Location: ${preset.location}.`;
+  } else if (state.preset) {
+    info.textContent = `The preset "${state.preset}" was not found.`;
+  } else {
+    info.textContent = "Model defaults only. Pick a preset to start from a saved configuration.";
+  }
+}
+
+async function onPresetChange(event) {
+  const name = event.target.value || null;
+  if (name === state.preset) return;
+  const count = Object.keys(state.overrides).length;
+  if (count && !window.confirm(`Changing the preset clears ${plural(count, "changed setting", "changed settings")}. Continue?`)) {
+    event.target.value = state.preset || "";
     return;
   }
-  if (schema.extras?.model_suggestions && !$("#model-suggestions")) {
-    const dl = el("datalist", { id: "model-suggestions" });
-    for (const m of schema.extras.model_suggestions) dl.append(el("option", { value: m }));
-    document.body.append(dl);
+  const kept = state.overrides;
+  state.overrides = {};
+  state.jsonErrors = {};
+  const ok = await selectPreset(name);
+  if (!ok) {
+    state.overrides = kept;
+    afterChange();
+    return;
   }
-  for (const g of schema.groups) {
-    const card = el("div", { class: "group", "data-group": g.key },
-      el("h2", {}, g.title, el("span", { class: "badge", id: `gbadge-${g.key}` })));
-    for (const p of g.params) {
-      const row = el("div", { class: "param" + (isChanged(p) ? " changed" : ""), "data-name": p.name },
-        el("span", { class: "dot" }),
-        el("label", { for: `param-${p.name}` }, p.name),
-        el("button", {
-          class: "info", "aria-label": `About ${p.name}`, tabindex: "0",
-          onmouseenter: (e) => showTip(e.currentTarget, p),
-          onmouseleave: hideTip,
-          onfocus: (e) => showTip(e.currentTarget, p),
-          onblur: hideTip,
-          onclick: (e) => e.preventDefault(),
-        }, "i"),
-        makeControl(p),
-        el("button", {
-          class: "reset", title: "Reset to default",
-          onclick: () => { delete state.values[p.name]; renderParams(); onValuesChanged(); },
-        }, "↺"));
-      card.append(row);
+  persistState();
+}
+
+async function fetchSchema(name, refresh) {
+  const key = name || "";
+  if (!refresh && state.schemaCache[key]) return state.schemaCache[key];
+  const query = new URLSearchParams();
+  if (name) query.set("preset", name);
+  if (refresh) query.set("refresh", "true");
+  const schema = await GET(`/api/schema?${query}`);
+  state.schemaCache[key] = schema;
+  return schema;
+}
+
+function setFormBusy(busy) {
+  const form = $("#form");
+  form.classList.toggle("busy", busy);
+  form.setAttribute("aria-busy", String(busy));
+}
+
+function showFormMessage(text) {
+  const form = $("#form");
+  form.textContent = "";
+  form.append(el("p", { class: "empty" }, text));
+}
+
+/* Loads a preset's schema and base values. Returns false when the load failed
+   and the previous preset was kept; true otherwise. */
+async function selectPreset(name, refresh = false) {
+  const previous = state.preset;
+  state.preset = name;
+  $("#presetSelect").value = name || "";
+  renderPresetInfo();
+  setFormBusy(true);
+  const load = ++state.loadSeq;
+  const seq = beginEvaluation();
+  try {
+    const [schema, baseResult] = await Promise.all([
+      fetchSchema(name, refresh),
+      POST("/api/evaluate", { preset: name, overrides: {} }),
+    ]);
+    if (load !== state.loadSeq) return true;
+    const fields = prepareFields(schema);
+    const base = baseResult.valid ? collectValues(baseResult, fields) : {};
+    state.schema = schema;
+    state.fields = fields;
+    state.base = base;
+    state.evaluation = null;
+    state.pinned = null;
+    buildForm();
+    if (Object.keys(state.overrides).length) runEvaluation();
+    else applyEvaluationResult(baseResult, seq);
+    return true;
+  } catch (error) {
+    if (load !== state.loadSeq) return true;
+    showError(error.message);
+    if (state.schema) {
+      state.preset = previous;
+      $("#presetSelect").value = previous || "";
+      renderPresetInfo();
+      applyEvaluationResult(null, seq);
+    } else {
+      showFormMessage("The settings could not be loaded. Check the error above, then check Settings.");
     }
-    root.append(card);
-  }
-  applyParamFilter();
-  onValuesChanged();
-}
-
-function applyParamFilter() {
-  const q = $("#param-search").value.trim().toLowerCase();
-  const changedOnly = $("#changed-only").checked;
-  for (const row of $$(".param")) {
-    const p = paramByName(row.dataset.name);
-    const hit = !q || p.name.includes(q) || (p.help || "").toLowerCase().includes(q);
-    row.style.display = hit && (!changedOnly || isChanged(p)) ? "" : "none";
-  }
-  for (const card of $$(".group")) {
-    const any = Array.from(card.querySelectorAll(".param")).some((r) => r.style.display !== "none");
-    card.style.display = any ? "" : "none";
-  }
-}
-
-function showTip(target, p) {
-  const tip = $("#tooltip");
-  tip.textContent = "";
-  tip.append(el("span", { class: "t-name" }, p.name));
-  tip.append(document.createTextNode(p.help || "(no description)"));
-  const def = Array.isArray(p.default) ? p.default.join(" ") : JSON.stringify(p.default);
-  tip.append(el("span", { class: "t-default" },
-    `default: ${def}` + (p.choices ? ` · choices: ${p.choices.join(", ")}` : "")));
-  tip.classList.remove("hidden");
-  const r = target.getBoundingClientRect();
-  const tw = tip.offsetWidth, th = tip.offsetHeight;
-  let x = Math.min(r.left, window.innerWidth - tw - 12);
-  let y = r.bottom + 8;
-  if (y + th > window.innerHeight - 8) y = r.top - th - 8;
-  tip.style.left = `${Math.max(8, x)}px`;
-  tip.style.top = `${Math.max(8, y)}px`;
-}
-function hideTip() { $("#tooltip").classList.add("hidden"); }
-
-/* ---------------- saved configs ---------------- */
-
-async function refreshConfigs() {
-  try {
-    const r = await GET("/api/configs");
-    const sel = $("#config-select");
-    sel.textContent = "";
-    sel.append(el("option", { value: "" }, "Load saved config…"));
-    state.configPaths = {};
-    for (const c of r.configs) {
-      state.configPaths[c.path] = c;
-      sel.append(el("option", { value: c.path }, `${c.name}  (${c.saved_at || ""})`));
-    }
-  } catch (e) { /* repo may be unset */ }
-}
-
-async function loadConfig(path) {
-  try {
-    const r = await GET(`/api/file?path=${encodeURIComponent(path)}`);
-    const data = JSON.parse(r.content);
-    state.values = data.values || {};
-    $("#opt-viz").checked = !!data.launch_viz;
-    $("#opt-resume").checked = !!data.resume;
-    $("#config-name").value = data.name || "";
-    renderParams();
-    await restoreEditorsFromValues();
-    toast(`Loaded config "${data.name || path}"`);
-  } catch (e) {
-    toast(`Could not load config: ${e.message}`, true);
-  }
-}
-
-/* ---------------- personas editor ---------------- */
-
-function normalizePersona(entry) {
-  if (typeof entry === "string") return { persona: entry, name: "", role: "", count: 1 };
-  return {
-    persona: String(entry.persona ?? ""),
-    name: String(entry.name ?? ""),
-    role: String(entry.role ?? ""),
-    count: entry.count || 1,
-  };
-}
-
-function exportPersonas() {
-  return state.personas
-    .filter((p) => p.persona.trim())
-    .map((p) => {
-      const out = { persona: p.persona.trim() };
-      if (p.name.trim()) out.name = p.name.trim();
-      if (p.role.trim()) out.role = p.role.trim();
-      if (+p.count > 1) out.count = +p.count;
-      return out;
-    });
-}
-
-function renderPersonas() {
-  const root = $("#personas-list");
-  root.textContent = "";
-  if (!state.personas.length) {
-    root.append(el("div", { class: "empty" }, "No personas — beings start with none. Add one, load a file, or let the Scenario AI write them."));
-  }
-  state.personas.forEach((p, i) => {
-    const card = el("div", { class: "card" },
-      el("div", { class: "card-head" }, `persona ${i + 1}`,
-        el("span", { class: "spacer" }),
-        el("button", { class: "icon-btn", title: "Duplicate", onclick: () => { state.personas.splice(i + 1, 0, { ...p }); renderPersonas(); } }, "⧉"),
-        el("button", { class: "icon-btn del", title: "Remove", onclick: () => { state.personas.splice(i, 1); renderPersonas(); } }, "✕")),
-      el("textarea", {
-        rows: "3", placeholder: "You are a cautious healer. You …",
-        oninput: (e) => { p.persona = e.target.value; },
-      }, p.persona),
-      el("div", { class: "row" },
-        el("label", {}, "name (optional)", el("input", { type: "text", value: p.name, placeholder: "drawn at random", oninput: (e) => { p.name = e.target.value; } })),
-        el("label", {}, "role (optional)", el("input", { type: "text", value: p.role, placeholder: "e.g. healer", oninput: (e) => { p.role = e.target.value; } })),
-        el("label", {}, "count", el("input", { type: "number", min: "1", value: p.count, oninput: (e) => { p.count = e.target.value; updatePersonaTotals(); } }))));
-    root.append(card);
-  });
-  updatePersonaTotals();
-}
-
-function updatePersonaTotals() {
-  const total = state.personas.reduce((n, p) => n + (parseInt(p.count, 10) || 1), 0);
-  $("#personas-count").textContent = total || "";
-  const initAgents = currentValue(paramByName("init_agents") || { default: null, name: "init_agents" });
-  $("#personas-total").textContent = total
-    ? `${total} being${total === 1 ? "" : "s"} covered · init_agents = ${initAgents ?? "?"}`
-    : "";
-}
-
-/* ---------------- artifacts editor ---------------- */
-
-function normalizeArtifact(a) {
-  return {
-    name: String(a.name ?? ""),
-    type: a.type || "text",
-    payload: String(a.payload ?? ""),
-    placement: a.pose ? "pose" : a.agent ? "agent" : a.role ? "role" : "random",
-    pose: Array.isArray(a.pose) ? a.pose.slice(0, 2) : [0, 0],
-    agent: String(a.agent ?? ""),
-    role: String(a.role ?? ""),
-    lifespan: a.lifespan ?? -1,
-    step: a.step ?? 0,
-    heal_probability: a.heal_probability ?? 0.2,
-    hazard_multiplier: a.hazard_multiplier ?? 1.0,
-    radius: a.radius ?? 1,
-  };
-}
-
-// a cleared number input holds ""; fall back to the engine default
-function num(v, dflt) {
-  const n = parseFloat(v);
-  return Number.isFinite(n) ? n : dflt;
-}
-
-function exportArtifacts() {
-  return state.artifacts
-    .filter((a) => a.name.trim())
-    .map((a) => {
-      const out = { name: a.name.trim(), type: a.type };
-      if (a.payload.trim()) out.payload = a.payload.trim();
-      if (a.placement === "pose") out.pose = [Math.trunc(num(a.pose[0], 0)), Math.trunc(num(a.pose[1], 0))];
-      if (a.placement === "agent" && a.agent.trim()) {
-        out.agent = a.agent.trim();
-        // the engine supports both: seeded only if the named being holds the role
-        if (a.role.trim()) out.role = a.role.trim();
-      }
-      if (a.placement === "role" && a.role.trim()) out.role = a.role.trim();
-      const lifespan = Math.trunc(num(a.lifespan, -1));
-      if (lifespan !== -1) out.lifespan = lifespan;
-      const step = Math.trunc(num(a.step, 0));
-      if (step !== 0) out.step = step;
-      if (a.type === "health_center") {
-        out.heal_probability = num(a.heal_probability, 0.2);
-        out.hazard_multiplier = num(a.hazard_multiplier, 1.0);
-        out.radius = Math.max(0, Math.trunc(num(a.radius, 1)));
-      }
-      return out;
-    });
-}
-
-function renderArtifacts() {
-  const root = $("#artifacts-list");
-  root.textContent = "";
-  if (!state.artifacts.length) {
-    root.append(el("div", { class: "empty" }, "No seeded artifacts. Add one, load a file, or let the Scenario AI write them."));
-  }
-  state.artifacts.forEach((a, i) => {
-    const placementInputs = () => {
-      if (a.placement === "pose") {
-        return el("div", { class: "row" },
-          el("label", {}, "x", el("input", { type: "number", value: a.pose[0], oninput: (e) => { a.pose[0] = e.target.value; } })),
-          el("label", {}, "y", el("input", { type: "number", value: a.pose[1], oninput: (e) => { a.pose[1] = e.target.value; } })));
-      }
-      if (a.placement === "agent") {
-        return el("div", { class: "row" },
-          el("label", {}, "into the inventory of being (tag or name)",
-            el("input", { type: "text", value: a.agent, placeholder: "being0 or Miriam", oninput: (e) => { a.agent = e.target.value; } })),
-          el("label", {}, "required role (optional)",
-            el("input", { type: "text", value: a.role, placeholder: "only if they hold it", oninput: (e) => { a.role = e.target.value; } })));
-      }
-      if (a.placement === "role") {
-        return el("div", { class: "row" },
-          el("label", {}, "into every being with persona role",
-            el("input", { type: "text", value: a.role, placeholder: "healer", oninput: (e) => { a.role = e.target.value; } })));
-      }
-      return null;
-    };
-    const card = el("div", { class: "card" },
-      el("div", { class: "card-head" }, `artifact ${i + 1}`,
-        el("span", { class: "spacer" }),
-        el("button", { class: "icon-btn", title: "Duplicate", onclick: () => { state.artifacts.splice(i + 1, 0, JSON.parse(JSON.stringify(a))); renderArtifacts(); } }, "⧉"),
-        el("button", { class: "icon-btn del", title: "Remove", onclick: () => { state.artifacts.splice(i, 1); renderArtifacts(); } }, "✕")),
-      el("div", { class: "row" },
-        el("label", {}, "name", el("input", { type: "text", value: a.name, placeholder: "welcome_stone", oninput: (e) => { a.name = e.target.value; } })),
-        el("label", {}, "type", (() => {
-          const sel = el("select", { onchange: (e) => { a.type = e.target.value; if (a.type === "health_center") a.placement = a.placement === "pose" ? "pose" : "random"; renderArtifacts(); } });
-          for (const t of ["text", "ppe", "health_center"]) sel.append(el("option", { value: t }, t));
-          sel.value = a.type;
-          return sel;
-        })())),
-      a.type === "text"
-        ? el("textarea", { rows: "2", placeholder: "Inscription other beings can read…", oninput: (e) => { a.payload = e.target.value; } }, a.payload)
-        : null,
-      el("div", { class: "row" },
-        el("label", {}, "placement", (() => {
-          const sel = el("select", { onchange: (e) => { a.placement = e.target.value; renderArtifacts(); } });
-          const opts = a.type === "health_center"
-            ? [["random", "random free cell"], ["pose", "map position"]]
-            : [["random", "random free cell"], ["pose", "map position"], ["agent", "being inventory"], ["role", "role inventories"]];
-          for (const [v, t] of opts) sel.append(el("option", { value: v }, t));
-          sel.value = a.placement;
-          return sel;
-        })()),
-        el("label", {}, "lifespan (−1 ∞)", el("input", { type: "number", value: a.lifespan, oninput: (e) => { a.lifespan = e.target.value; } })),
-        el("label", {}, "appears at step", el("input", { type: "number", min: "0", value: a.step, oninput: (e) => { a.step = e.target.value; } }))),
-      placementInputs(),
-      a.type === "health_center"
-        ? el("div", { class: "row" },
-            el("label", {}, "heal probability", el("input", { type: "number", step: "0.05", min: "0", max: "1", value: a.heal_probability, oninput: (e) => { a.heal_probability = e.target.value; } })),
-            el("label", {}, "hazard ×", el("input", { type: "number", step: "0.1", min: "0", value: a.hazard_multiplier, oninput: (e) => { a.hazard_multiplier = e.target.value; } })),
-            el("label", {}, "radius", el("input", { type: "number", min: "0", value: a.radius, oninput: (e) => { a.radius = e.target.value; } })))
-        : null);
-    root.append(card);
-  });
-  $("#artifacts-count").textContent = state.artifacts.length || "";
-}
-
-/* ---------------- files (load/save editors) ---------------- */
-
-async function fillFileSelect(kind, selectId) {
-  try {
-    const r = await GET(`/api/files?kind=${kind}`);
-    const sel = $(selectId);
-    const keep = sel.options[0];
-    sel.textContent = "";
-    sel.append(keep);
-    for (const f of r.files) sel.append(el("option", { value: f }, f));
-  } catch (e) { /* ignore */ }
-}
-
-async function loadJsonFile(path) {
-  const r = await GET(`/api/file?path=${encodeURIComponent(path)}`);
-  return JSON.parse(r.content);
-}
-
-async function saveEditorFile(kind) {
-  const isPersonas = kind === "personas";
-  const pathInput = $(isPersonas ? "#personas-path" : "#artifacts-path");
-  const path = pathInput.value.trim() ||
-    (isPersonas ? "launcher_configs/personas.json" : "launcher_configs/init_artifacts.json");
-  pathInput.value = path;
-  const data = isPersonas ? exportPersonas() : exportArtifacts();
-  try {
-    const r = await POST("/api/file", { path, content: JSON.stringify(data, null, 2) });
-    setValue(isPersonas ? "personas" : "init_artifacts", r.path);
-    renderParams();
-    toast(`Saved ${r.path} and set --${isPersonas ? "personas" : "init_artifacts"}`);
-  } catch (e) {
-    toast(`Save failed: ${e.message}`, true);
-  }
-}
-
-async function restoreEditorsFromValues() {
-  const pPath = state.values.personas;
-  if (pPath) {
-    try {
-      state.personas = (await loadJsonFile(pPath)).map(normalizePersona);
-      $("#personas-path").value = pPath;
-    } catch (e) { /* stale path */ }
-  }
-  const aPath = state.values.init_artifacts;
-  if (aPath) {
-    try {
-      state.artifacts = (await loadJsonFile(aPath)).map(normalizeArtifact);
-      $("#artifacts-path").value = aPath;
-    } catch (e) { /* stale path */ }
-  }
-  renderPersonas();
-  renderArtifacts();
-}
-
-/* ---------------- scenario designer ---------------- */
-
-let designerLoaded = false;
-async function initScenarioTab() {
-  if (designerLoaded) return;
-  designerLoaded = true;
-  // usable immediately; the slow litellm catalogue only feeds the datalist
-  $("#designer-model").value = state.settings?.last_model || "claude-opus-5";
-  try {
-    state.prompts = await GET("/api/prompts");
-    $("#sys-original").textContent = state.prompts.sys_prompt || "(not found in target repo)";
-    $("#step-original").textContent = state.prompts.agent_prompt || "(not found in target repo)";
-  } catch (e) { /* shown on design */ }
-  try {
-    const r = await GET("/api/designer/models");
-    const dl = $("#designer-models");
-    dl.textContent = "";
-    for (const m of r.models) dl.append(el("option", { value: m }));
-    // never clobber what the user typed while the catalogue loaded
-    if (!$("#designer-model").value) $("#designer-model").value = r.default || "claude-opus-5";
-    const found = Object.entries(r.keys).filter(([, v]) => v).map(([k]) => k);
-    $("#designer-hint").textContent = found.length
-      ? `Detected in environment: ${found.join(", ")} — the list shows only models those keys can reach (any other model can still be typed, with its key pasted). Keys are used per call, never stored.`
-      : "No API key detected in the environment or the repo's .env — paste one for the model's provider. Used for this call only, never stored.";
-  } catch (e) { /* ignore */ }
-}
-
-function designRequestBody() {
-  return {
-    description: $("#scenario-desc").value.trim(),
-    model: $("#designer-model").value.trim(),
-    api_key: $("#designer-key").value,
-    personas: exportPersonas(),
-    artifacts: exportArtifacts(),
-    values: state.values,
-  };
-}
-
-// the design as it stands on screen — manual textarea edits included
-function currentDesign() {
-  return {
-    sys_prompt: $("#sys-adapted").value,
-    agent_prompt: $("#step-adapted").value,
-    personas: state.design?.personas || [],
-    init_artifacts: state.design?.init_artifacts || [],
-    suggested_params: state.design?.suggested_params || [],
-    design_notes: state.design?.design_notes || "",
-  };
-}
-
-async function runDesign() {
-  const desc = $("#scenario-desc").value.trim();
-  if (!desc) return toast("Describe the scenario first", true);
-  const btn = $("#design-btn");
-  btn.disabled = true;
-  $("#design-status").classList.remove("hidden");
-  $("#design-status").textContent = `Asking ${$("#designer-model").value} to design the scenario — this can take a minute…`;
-  try {
-    const r = await POST("/api/design", designRequestBody());
-    state.design = r.result;
-    state.designHistory = [];
-    state.refineLog = [];
-    renderRefineLog();
-    showDesign(r.result, r.issues);
-    toast("Scenario designed — review, edit, refine, then save the bundle");
-  } catch (e) {
-    toast(`Design failed: ${e.message}`, true);
+    return false;
   } finally {
-    btn.disabled = false;
-    $("#design-status").classList.add("hidden");
+    if (load === state.loadSeq) setFormBusy(false);
   }
 }
 
-async function runRefine() {
-  const feedback = $("#refine-input").value.trim();
-  if (!feedback) return toast("Say what to change first", true);
-  if (!state.design) return;
-  const btn = $("#refine-btn");
-  btn.disabled = true;
-  $("#design-status").classList.remove("hidden");
-  $("#design-status").textContent = `Refining with ${$("#designer-model").value}…`;
-  const before = currentDesign();
-  try {
-    const r = await POST("/api/design", {
-      ...designRequestBody(),
-      feedback,
-      current: before,
-    });
-    state.designHistory.push(before);
-    state.refineLog.push(feedback);
-    state.design = r.result;
-    showDesign(r.result, r.issues);
-    $("#refine-input").value = "";
-    renderRefineLog();
-    toast("Design refined");
-  } catch (e) {
-    toast(`Refine failed: ${e.message}`, true);
-  } finally {
-    btn.disabled = false;
-    $("#design-status").classList.add("hidden");
-  }
-}
+/* ---------------- field catalogue ---------------- */
 
-function refineUndo() {
-  if (!state.designHistory.length) return;
-  state.design = state.designHistory.pop();
-  state.refineLog.pop();
-  showDesign(state.design, []);
-  renderRefineLog();
-  toast("Restored the previous version");
-}
-
-function renderRefineLog() {
-  const log = $("#refine-log");
-  log.textContent = "";
-  state.refineLog.forEach((f, i) => {
-    log.append(el("span", { class: "chip", title: f }, `v${i + 2}: ${f}`));
-  });
-  $("#refine-undo").classList.toggle("hidden", !state.designHistory.length);
-}
-
-function showDesign(d, issues) {
-  $("#design-result").classList.remove("hidden");
-  $("#design-notes").textContent = d.design_notes || "";
-  const issuesEl = $("#design-issues");
-  issuesEl.classList.toggle("hidden", !issues.length);
-  issuesEl.textContent = "";
-  if (issues.length) {
-    const ul = el("ul");
-    for (const i of issues) ul.append(el("li", {}, i));
-    issuesEl.append(ul);
-  }
-  $("#sys-adapted").value = d.sys_prompt || "";
-  $("#step-adapted").value = d.agent_prompt || "";
-  $("#design-personas").textContent = JSON.stringify(d.personas, null, 2);
-  $("#design-artifacts").textContent = JSON.stringify(d.init_artifacts, null, 2);
-  const chips = $("#design-params");
-  chips.textContent = "";
-  if (!d.suggested_params.length) chips.append(el("span", { class: "hint" }, "none suggested"));
-  state.paramAppliers = [];
-  for (const s of d.suggested_params) {
-    const known = !!paramByName(s.name);
-    let btn;
-    const apply = () => { // sets the value; the caller re-renders once
-      if (!known || btn.disabled) return;
-      setValue(s.name, s.value);
-      chip.classList.add("applied");
-      btn.textContent = "✓ applied";
-      btn.disabled = true;
-    };
-    btn = el("button", {
-      onclick: () => { apply(); renderParams(); },
-      title: known ? "" : "not a parameter of this TerraLingua version",
-    }, "apply");
-    btn.disabled = !known;
-    const chip = el("span", { class: "pchip" },
-      el("code", {}, `${s.name} = ${JSON.stringify(s.value)}`),
-      el("span", { class: "why" }, s.why || ""),
-      btn);
-    chips.append(chip);
-    if (known) state.paramAppliers.push(apply);
-  }
-  const allBtn = $("#apply-all-params");
-  allBtn.classList.toggle("hidden", !state.paramAppliers.length);
-  allBtn.textContent = "✓ apply all";
-  allBtn.disabled = false;
-  if (!$("#bundle-name").value) {
-    $("#bundle-name").value = $("#scenario-desc").value.trim().toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_").split("_").slice(0, 4).join("_");
-  }
-  $("#design-result").scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-async function saveBundle() {
-  if (!state.design) return;
-  try {
-    const r = await POST("/api/bundle", {
-      name: $("#bundle-name").value,
-      sys_prompt: $("#sys-adapted").value,
-      agent_prompt: $("#step-adapted").value,
-      personas: state.design.personas,
-      init_artifacts: state.design.init_artifacts,
-    });
-    if (r.paths.personas) setValue("personas", r.paths.personas);
-    if (r.paths.init_artifacts) setValue("init_artifacts", r.paths.init_artifacts);
-    if (r.paths.prompt_templates) {
-      if (state.prompts?.supports_override) {
-        setValue("prompt_templates", r.paths.prompt_templates);
-      } else {
-        toast("Saved, but this TerraLingua version has no --prompt_templates parameter; prompts saved for manual use", true);
-      }
-    }
-    renderParams();
-    await restoreEditorsFromValues();
-    toast(`Scenario bundle saved to ${r.dir} and wired into the launch form`);
-  } catch (e) {
-    toast(`Bundle save failed: ${e.message}`, true);
-  }
-}
-
-function downloadBundle() {
-  if (!state.design) return;
-  const files = {
-    "prompt_templates.json": JSON.stringify(
-      { sys_prompt: $("#sys-adapted").value, agent_prompt: $("#step-adapted").value }, null, 2),
-    "personas.json": JSON.stringify(state.design.personas, null, 2),
-    "init_artifacts.json": JSON.stringify(state.design.init_artifacts, null, 2),
+function schemaTypes(schema) {
+  const types = new Set();
+  const add = (part) => {
+    if (!part) return;
+    if (part.type) types.add(part.type);
+    if (part.$ref) types.add("object");
   };
-  for (const [name, content] of Object.entries(files)) {
-    const a = el("a", {
-      href: URL.createObjectURL(new Blob([content], { type: "application/json" })),
-      download: name,
-    });
-    document.body.append(a);
-    a.click();
-    a.remove();
+  add(schema);
+  for (const alt of [...(schema?.anyOf || []), ...(schema?.oneOf || [])]) add(alt);
+  return types;
+}
+
+function enumChoices(field) {
+  const schema = field.schema || {};
+  const choices = [...(schema.enum || [])];
+  for (const alt of [...(schema.anyOf || []), ...(schema.oneOf || [])]) {
+    if (alt.enum) choices.push(...alt.enum);
+  }
+  return choices;
+}
+
+function isOptional(field) {
+  return schemaTypes(field.schema).has("null") || /\bNone\b/.test(field.type || "");
+}
+
+function isInteger(field) {
+  const types = schemaTypes(field.schema);
+  if (types.has("integer") && !types.has("number")) return true;
+  return /^int\b/.test(field.type || "") && !/float/.test(field.type || "");
+}
+
+function controlKind(field) {
+  const types = schemaTypes(field.schema);
+  const typeText = field.type || "";
+  if (field.children.length) return "nested";
+  if (types.has("array") || types.has("object") || /\b(list|tuple|dict|set)\b/.test(typeText)) return "json";
+  if (enumChoices(field).length) return "enum";
+  if (types.has("boolean") || /^bool\b/.test(typeText)) return isOptional(field) ? "tribool" : "bool";
+  if (types.has("integer") || types.has("number") || /\b(int|float)\b/.test(typeText)) return "number";
+  return "text";
+}
+
+function parentPath(path, fields) {
+  if (!fields[path].scenario) return null;
+  const parts = path.split(".");
+  for (let n = parts.length - 1; n > 0; n--) {
+    const candidate = parts.slice(0, n).join(".");
+    if (candidate in fields && fields[candidate].scenario) return candidate;
+  }
+  return null;
+}
+
+function prepareFields(schema) {
+  const fields = {};
+  for (const [path, field] of Object.entries(schema.fields || {})) {
+    fields[path] = { ...field, path, scenario: false };
+  }
+  for (const [path, field] of Object.entries(schema.scenario?.fields || {})) {
+    fields[path] = { ...field, path, scenario: true, aliases: [], group: SCENARIO_GROUP };
+  }
+  const paths = Object.keys(fields);
+  const aliasOwners = new Map();
+  for (const path of paths) {
+    fields[path].parent = parentPath(path, fields);
+    for (const alias of fields[path].aliases || []) aliasOwners.set(alias, (aliasOwners.get(alias) || 0) + 1);
+  }
+  for (const path of paths) {
+    const field = fields[path];
+    field.children = paths.filter((p) => fields[p].parent === path);
+    field.title = field.schema?.title || path.split(".").pop();
+    field.optional = isOptional(field);
+    field.kind = controlKind(field);
+    const alias = (field.aliases || []).find((name) => aliasOwners.get(name) === 1);
+    field.flag = field.scenario ? path : `--${alias || path}`;
+    field.searchText = [path, ...(field.aliases || []), field.title, field.description || ""].join(" ").toLowerCase();
+  }
+  return fields;
+}
+
+function hasScenarioFields() {
+  return Object.values(state.fields).some((field) => field.scenario);
+}
+
+/* ---------------- overrides ---------------- */
+
+function overrideHolder(path) {
+  let ancestor = state.fields[path]?.parent || null;
+  while (ancestor) {
+    if (ancestor in state.overrides && isPlainObject(state.overrides[ancestor])) return ancestor;
+    ancestor = state.fields[ancestor].parent;
+  }
+  return null;
+}
+
+function relativeKeys(ancestor, path) {
+  return path.slice(ancestor.length + 1).split(".");
+}
+
+function overrideFor(path) {
+  if (path in state.overrides) return { present: true, value: state.overrides[path] };
+  const holder = overrideHolder(path);
+  if (holder) {
+    const found = walk(state.overrides[holder], relativeKeys(holder, path));
+    if (found.ok) return { present: true, value: found.value };
+  }
+  return { present: false, value: undefined };
+}
+
+function setOverride(path, value) {
+  const holder = overrideHolder(path);
+  if (holder) {
+    setNested(state.overrides[holder], relativeKeys(holder, path), value);
+  } else if (path in state.base && sameValue(value, state.base[path])) {
+    delete state.overrides[path];
+  } else {
+    state.overrides[path] = value;
+  }
+  afterChange();
+}
+
+function clearOverride(path) {
+  delete state.overrides[path];
+  const holder = overrideHolder(path);
+  if (holder) deleteNested(state.overrides[holder], relativeKeys(holder, path));
+  afterChange();
+}
+
+function deleteDescendantOverrides(path) {
+  for (const key of Object.keys(state.overrides)) {
+    if (key.startsWith(`${path}.`)) delete state.overrides[key];
   }
 }
 
-/* ---------------- console / processes ---------------- */
-
-function fmtUptime(startedAt) {
-  const s = Math.max(0, Math.floor(Date.now() / 1000 - startedAt));
-  return s < 60 ? `${s}s` : s < 3600 ? `${(s / 60) | 0}m ${s % 60}s` : `${(s / 3600) | 0}h ${((s % 3600) / 60) | 0}m`;
+function toggleParent(path, enabled) {
+  if (!enabled) {
+    deleteDescendantOverrides(path);
+    setOverride(path, null);
+    return;
+  }
+  delete state.overrides[path];
+  const base = state.base[path];
+  if (base === null || base === undefined) state.overrides[path] = {};
+  afterChange();
 }
 
-function renderProcs() {
-  const root = $("#proc-list");
+function resetField(path) {
+  delete state.jsonErrors[path];
+  clearOverride(path);
+}
+
+function resetAll() {
+  const count = Object.keys(state.overrides).length;
+  if (!count) {
+    toast("There are no changes to reset.");
+    return;
+  }
+  if (!window.confirm(`Reset ${plural(count, "changed setting", "changed settings")} to the preset values?`)) return;
+  state.overrides = {};
+  state.jsonErrors = {};
+  afterChange();
+}
+
+function afterChange() {
+  state.evalPending = true;
+  refreshRows();
+  updateActionButtons();
+  scheduleEvaluate();
+  persistState();
+}
+
+/* ---------------- values and states ---------------- */
+
+function collectValues(result, fields = state.fields) {
+  const values = { ...(result.inactive_values || {}), ...(result.active_values || {}) };
+  const options = result.resolved?.run?.scenario_options;
+  for (const [path, field] of Object.entries(fields)) {
+    if (!field.scenario) continue;
+    const found = walk(options, path.slice(SCENARIO_PREFIX.length).split("."));
+    if (found.ok) values[path] = found.value;
+  }
+  return values;
+}
+
+function evaluatedValue(path) {
+  if (path in state.base) return state.base[path];
+  const values = state.evaluation?.values;
+  if (values && path in values) return values[path];
+  return state.fields[path]?.default;
+}
+
+function displayValue(path) {
+  const override = overrideFor(path);
+  return override.present ? override.value : evaluatedValue(path);
+}
+
+function fieldState(path) {
+  return state.evaluation?.states?.[path] || { active: true, reason: "" };
+}
+
+function ancestorNull(path) {
+  let ancestor = state.fields[path]?.parent || null;
+  while (ancestor) {
+    const value = displayValue(ancestor);
+    if (value === null || value === undefined) return true;
+    ancestor = state.fields[ancestor].parent;
+  }
+  return false;
+}
+
+function startingValue(field) {
+  if (field.default !== null && field.default !== undefined) return field.default;
+  const base = state.base[field.path];
+  if (base !== null && base !== undefined) return base;
+  switch (field.kind) {
+    case "number": return numberBounds(field).min ?? 0;
+    case "enum": return enumChoices(field)[0];
+    case "json": return schemaTypes(field.schema).has("object") ? {} : [];
+    default: return "";
+  }
+}
+
+function diagnosticPath(field) {
+  if (!field) return null;
+  if (field in state.fields) return field;
+  if (SCENARIO_PREFIX + field in state.fields) return SCENARIO_PREFIX + field;
+  return null;
+}
+
+function errorMap() {
+  const errors = new Map();
+  for (const diagnostic of state.diagnostics) {
+    if (diagnostic.severity !== "error") continue;
+    const path = diagnosticPath(diagnostic.field);
+    if (path && !errors.has(path)) errors.set(path, diagnostic);
+  }
+  return errors;
+}
+
+/* ---------------- controls ---------------- */
+
+function numberBounds(field) {
+  const schema = field.schema || {};
+  const integer = isInteger(field);
+  const bounds = {};
+  for (const part of [schema, ...(schema.anyOf || [])]) {
+    if (part.minimum !== undefined) bounds.min = part.minimum;
+    if (part.maximum !== undefined) bounds.max = part.maximum;
+    if (part.exclusiveMinimum !== undefined) bounds.min = integer ? part.exclusiveMinimum + 1 : part.exclusiveMinimum;
+    if (part.exclusiveMaximum !== undefined) bounds.max = integer ? part.exclusiveMaximum - 1 : part.exclusiveMaximum;
+  }
+  return bounds;
+}
+
+function makeSwitch(id, onToggle, withText) {
+  const input = el("input", { type: "checkbox", role: "switch", id, onchange: () => onToggle(input.checked) });
+  const track = el("span", { class: "track", "aria-hidden": "true" });
+  const wrap = el("span", { class: "switch" }, input, track);
+  const text = withText ? el("span", { class: "hint" }) : null;
+  const node = text ? el("span", { class: "switch-with-text" }, wrap, text) : wrap;
+  return {
+    el: node,
+    input,
+    setValue: (value) => {
+      input.checked = value !== null && value !== undefined && value !== false;
+      if (text) text.textContent = input.checked ? "enabled" : "disabled (null)";
+    },
+    setDisabled: (disabled) => { input.disabled = disabled; },
+  };
+}
+
+function makeTribool(id, onChange) {
+  const select = el("select", { id, onchange: () => onChange(select.value === "null" ? null : select.value === "true") },
+    el("option", { value: "true" }, "true"),
+    el("option", { value: "false" }, "false"),
+    el("option", { value: "null" }, "null"));
+  return {
+    el: select,
+    input: select,
+    setValue: (value) => { select.value = value === null || value === undefined ? "null" : String(!!value); },
+    setDisabled: (disabled) => { select.disabled = disabled; },
+  };
+}
+
+function makeSelect(id, choices, onChange) {
+  const select = el("select", { id, onchange: () => onChange(choices[Number(select.value)]) });
+  choices.forEach((choice, index) => select.append(el("option", { value: String(index) }, String(choice))));
+  return {
+    el: select,
+    input: select,
+    setValue: (value) => {
+      const index = choices.findIndex((choice) => sameValue(choice, value));
+      select.selectedIndex = index;
+    },
+    setDisabled: (disabled) => { select.disabled = disabled; },
+  };
+}
+
+function makeNumber(field, id, onChange) {
+  const integer = isInteger(field);
+  const bounds = numberBounds(field);
+  const input = el("input", {
+    type: "number",
+    id,
+    step: integer ? "1" : "any",
+    inputmode: integer ? "numeric" : "decimal",
+    min: bounds.min === undefined ? null : String(bounds.min),
+    max: bounds.max === undefined ? null : String(bounds.max),
+  });
+  input.addEventListener("input", () => {
+    if (input.validity.badInput) return;
+    if (input.value === "") {
+      clearOverride(field.path);
+      return;
+    }
+    const number = Number(input.value);
+    if (Number.isFinite(number)) onChange(number);
+  });
+  return {
+    el: input,
+    input,
+    setValue: (value) => { input.value = value === null || value === undefined ? "" : String(value); },
+    setDisabled: (disabled) => { input.disabled = disabled; },
+  };
+}
+
+function isLongText(field) {
+  return typeof field.default === "string" && field.default.length > LONG_TEXT;
+}
+
+function makeText(field, id, onChange) {
+  const holder = el("span", { class: "text-holder" });
+  const handle = { el: holder, input: null, setValue: null, setDisabled: null };
+  const build = (long) => {
+    const node = long
+      ? el("textarea", { id, rows: "3", spellcheck: "false" })
+      : el("input", { type: "text", id, spellcheck: "false" });
+    node.addEventListener("input", () => onChange(node.value));
+    if (handle.input) {
+      node.disabled = handle.input.disabled;
+      handle.input.replaceWith(node);
+    } else {
+      holder.append(node);
+    }
+    handle.input = node;
+  };
+  build(isLongText(field));
+  handle.setValue = (value) => {
+    const text = value === null || value === undefined ? "" : String(value);
+    const long = isLongText(field) || text.length > LONG_TEXT;
+    const focused = document.activeElement === handle.input;
+    if (long !== (handle.input.tagName === "TEXTAREA") && !focused) build(long);
+    handle.input.value = text;
+  };
+  handle.setDisabled = (disabled) => { handle.input.disabled = disabled; };
+  return handle;
+}
+
+function makeJson(field, id) {
+  const textarea = el("textarea", { id, rows: "2", spellcheck: "false", class: "json" });
+  textarea.addEventListener("input", () => {
+    const text = textarea.value.trim();
+    if (!text) {
+      delete state.jsonErrors[field.path];
+      clearOverride(field.path);
+      return;
+    }
+    try {
+      const value = JSON.parse(text);
+      delete state.jsonErrors[field.path];
+      setOverride(field.path, value);
+    } catch (error) {
+      state.jsonErrors[field.path] = error.message;
+      refreshRows();
+      updateActionButtons();
+    }
+  });
+  return {
+    el: textarea,
+    input: textarea,
+    setValue: (value) => {
+      const text = value === undefined ? "" : formatJson(value);
+      textarea.value = text;
+      textarea.rows = Math.min(10, Math.max(2, text.split("\n").length));
+    },
+    setDisabled: (disabled) => { textarea.disabled = disabled; },
+  };
+}
+
+function withNullBox(field, control) {
+  if (!field.optional) return control;
+  const box = el("input", {
+    type: "checkbox",
+    "aria-label": `Set ${field.title} to null`,
+    onchange: () => setOverride(field.path, box.checked ? null : startingValue(field)),
+  });
+  const node = el("span", { class: "ctl-with-null" }, control.el, el("label", { class: "null-label" }, box, "null"));
+  return {
+    el: node,
+    get input() { return control.input; },
+    setValue: (value) => {
+      box.checked = value === null;
+      control.setValue(value);
+    },
+    setDisabled: (disabled) => {
+      box.disabled = disabled;
+      control.setDisabled(disabled || box.checked);
+    },
+  };
+}
+
+function makeControl(field, id) {
+  const path = field.path;
+  switch (field.kind) {
+    case "nested": return makeSwitch(id, (on) => toggleParent(path, on), true);
+    case "bool": return makeSwitch(id, (on) => setOverride(path, on), false);
+    case "tribool": return makeTribool(id, (value) => setOverride(path, value));
+    case "enum": return withNullBox(field, makeSelect(id, enumChoices(field), (value) => setOverride(path, value)));
+    case "number": return withNullBox(field, makeNumber(field, id, (value) => setOverride(path, value)));
+    case "json": return withNullBox(field, makeJson(field, id));
+    default: return withNullBox(field, makeText(field, id, (value) => setOverride(path, value)));
+  }
+}
+
+/* ---------------- form ---------------- */
+
+function constraintText(id) {
+  return (state.schema?.constraints || []).find((c) => c.id === id)?.description || "";
+}
+
+function linkChip(path) {
+  return el("button", { type: "button", class: "link-chip", onclick: () => jumpToField(path) }, path);
+}
+
+function buildDetails(field) {
+  const list = el("dl", { class: "row-details" });
+  const add = (term, ...content) => list.append(el("dt", {}, term), el("dd", {}, ...content));
+  add("Description", field.description || "No description.");
+  if (field.notes) add("Notes", field.notes);
+  add("Path", el("code", {}, field.path));
+  add("Flag", el("code", {}, field.flag));
+  add("Default", el("code", {}, formatValue(field.default)));
+  if (field.type) add("Type", el("code", {}, field.type));
+  if (field.depends_on?.length) add("Depends on", ...field.depends_on.map(linkChip));
+  if (field.affects?.length) add("Affects", ...field.affects.map(linkChip));
+  if (field.inactive_reason) add("Condition", field.inactive_reason);
+  const rules = (field.constraints || []).map(constraintText).filter(Boolean);
+  if (rules.length) add("Rules", el("ul", { class: "rules" }, ...rules.map((rule) => el("li", {}, rule))));
+  return list;
+}
+
+function toggleDetails(path) {
+  const row = state.rows[path];
+  const open = row.detailsNode.hidden;
+  row.detailsNode.hidden = !open;
+  row.detailsButton.setAttribute("aria-expanded", String(open));
+}
+
+function buildRow(path, section) {
+  const field = state.fields[path];
+  const id = `ctl-${path.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  const control = makeControl(field, id);
+  const changedMark = el("span", { class: "changed-mark" }, "changed");
+  const label = el("label", { class: "row-label", for: id },
+    el("span", { class: "title", title: path }, field.title), changedMark);
+  const reset = el("button", {
+    type: "button", class: "ghost reset", "aria-label": `Reset ${field.title}`, onclick: () => resetField(path),
+  }, "Reset");
+  const detailsButton = el("button", {
+    type: "button", class: "ghost", "aria-expanded": "false", "aria-controls": `${id}-details`,
+    "aria-label": `Details of ${field.title}`, onclick: () => toggleDetails(path),
+  }, "Details");
+  const reasonNode = el("p", { class: "row-reason", id: `${id}-reason`, hidden: true });
+  const errorText = el("span");
+  const errorNode = el("p", { class: "row-error", id: `${id}-error`, hidden: true }, el("strong", {}, "Error:"), " ", errorText);
+  const detailsNode = buildDetails(field);
+  detailsNode.id = `${id}-details`;
+  detailsNode.hidden = true;
+  const row = el("div", { class: "row", "data-path": path },
+    label,
+    el("div", { class: "row-control" }, control.el),
+    el("div", { class: "row-actions" }, reset, detailsButton),
+    reasonNode, errorNode, detailsNode);
+  state.rows[path] = { path, section, el: row, control, reset, detailsButton, changedMark, reasonNode, errorNode, errorText, detailsNode };
+  if (!field.children.length) return row;
+  const children = el("div", { class: "children" });
+  for (const child of field.children) children.append(buildRow(child, section));
+  return el("div", { class: "nest" }, row, children);
+}
+
+function buildSection(group) {
+  const badge = el("span", { class: "badge changed-count" });
+  const note = el("p", { class: "group-note", hidden: true });
+  const body = el("div", { class: "group-body" });
+  const section = { name: group.name, badge, note, body, el: null };
+  for (const path of group.paths) body.append(buildRow(path, section));
+  section.el = el("details", { class: "group", open: true }, el("summary", {}, group.name, badge), body, note);
+  state.sections.push(section);
+  return section.el;
+}
+
+function buildForm() {
+  const root = $("#form");
   root.textContent = "";
-  if (!state.procs.length) {
-    root.append(el("div", { class: "empty" }, "Nothing launched yet."));
+  state.rows = {};
+  state.sections = [];
+  state.jsonErrors = {};
+  const scenario = hasScenarioFields();
+  if (scenario) delete state.overrides["run.scenario_options"];
+  const groups = (state.schema.groups || []).map((group) => ({
+    name: group.name,
+    paths: group.fields.filter((path) => state.fields[path] && !(scenario && path === "run.scenario_options")),
+  }));
+  const scenarioRoots = Object.values(state.fields).filter((field) => field.scenario && !field.parent).map((field) => field.path);
+  if (scenarioRoots.length) groups.unshift({ name: SCENARIO_GROUP, paths: scenarioRoots });
+  for (const group of groups) {
+    if (group.paths.length) root.append(buildSection(group));
   }
-  for (const p of state.procs) {
-    const statusClass = p.status === "running" ? "running" : p.status.startsWith("exited") ? "exited" : "stopped";
-    const glyph = statusClass === "running" ? "●" : statusClass === "exited" ? "⚠" : "▪";
-    root.append(el("div", { class: "card" },
-      el("div", { class: "card-head" },
-        el("b", {}, p.kind === "viz" ? "📊 " + p.label : "🌍 " + p.label),
-        el("span", { class: `proc-status ${statusClass}` }, `${glyph} ${p.status}`),
-        el("span", { class: "spacer" }),
-        p.status === "running" ? el("span", { class: "hint" }, fmtUptime(p.started_at)) : null),
-      el("code", { class: "hint", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap", title: p.cmd }, p.cmd),
-      el("div", { class: "row" },
-        el("button", { onclick: () => { state.logProcId = p.id; state.logOffset = 0; $("#log-view").textContent = ""; syncLogSelect(); } }, "view log"),
-        p.status === "running" ? el("button", { class: "danger-ghost", onclick: () => stopProc(p.id, false) }, "stop") : null,
-        p.status === "running" ? el("button", { class: "danger-ghost", onclick: () => stopProc(p.id, true) }, "force kill") : null)));
-  }
-  syncLogSelect();
+  refreshRows();
 }
 
-function syncLogSelect() {
-  const sel = $("#log-select");
-  sel.textContent = "";
-  for (const p of state.procs) {
-    sel.append(el("option", { value: p.id }, `#${p.id} ${p.kind} — ${p.label}`));
+function refreshRows() {
+  const query = state.search.trim().toLowerCase();
+  const errors = errorMap();
+  const stats = new Map(state.sections.map((section) => [section, { visible: 0, inactiveHidden: 0, changed: 0 }]));
+  let inactiveTotal = 0;
+  for (const row of Object.values(state.rows)) {
+    const path = row.path;
+    const field = state.fields[path];
+    const fstate = fieldState(path);
+    const changed = overrideFor(path).present;
+    const error = errors.get(path);
+    const jsonError = state.jsonErrors[path];
+    const parentNull = ancestorNull(path);
+    const matches = !query || field.searchText.includes(query);
+    const inactiveHidden = !fstate.active && !state.showInactive;
+    const visible = !!error || state.pinned === path || (matches && !inactiveHidden && !parentNull);
+    if (!fstate.active) inactiveTotal++;
+    row.el.hidden = !visible;
+    row.el.classList.toggle("inactive", !fstate.active);
+    row.el.classList.toggle("changed", changed);
+    row.el.classList.toggle("has-error", !!error);
+    row.el.classList.toggle("has-json-error", !!jsonError);
+    row.changedMark.hidden = !changed;
+    row.reset.hidden = !changed;
+    row.reasonNode.hidden = fstate.active;
+    row.reasonNode.textContent = fstate.active ? "" : fstate.reason || "This setting does not apply with the current configuration.";
+    const errorText = error ? error.message : jsonError ? `Invalid JSON. ${jsonError}` : "";
+    row.errorNode.hidden = !errorText;
+    row.errorText.textContent = errorText;
+    const editing = document.activeElement === row.control.input || !!jsonError;
+    if (!editing) row.control.setValue(displayValue(path));
+    row.control.setDisabled(!fstate.active);
+    const describedBy = [fstate.active ? "" : row.reasonNode.id, errorText ? row.errorNode.id : ""].filter(Boolean);
+    setAttr(row.control.input, "aria-describedby", describedBy.join(" ") || null);
+    setAttr(row.control.input, "aria-invalid", errorText ? "true" : null);
+    const count = stats.get(row.section);
+    if (visible) count.visible++;
+    else if (inactiveHidden && matches && !parentNull) count.inactiveHidden++;
+    if (changed) count.changed++;
   }
-  if (state.logProcId === null && state.procs.length) state.logProcId = state.procs[0].id;
-  if (state.logProcId !== null) sel.value = String(state.logProcId);
+  for (const section of state.sections) {
+    const count = stats.get(section);
+    const noteNeeded = count.visible === 0 && count.inactiveHidden > 0;
+    section.el.hidden = count.visible === 0 && count.inactiveHidden === 0;
+    section.note.hidden = !noteNeeded;
+    section.note.textContent = `${count.inactiveHidden} ${count.inactiveHidden === 1 ? "setting does" : "settings do"} not apply with the current configuration.`;
+    section.badge.textContent = count.changed ? `${count.changed} changed` : "";
+  }
+  $("#showInactiveText").textContent = `Show inactive settings (${inactiveTotal})`;
 }
 
-async function stopProc(id, force) {
+function jumpToField(path) {
+  const row = state.rows[path];
+  if (!row) return;
+  state.pinned = path;
+  refreshRows();
+  const section = row.el.closest("details.group");
+  if (section) section.open = true;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  row.el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+  row.el.classList.add("flash");
+  setTimeout(() => row.el.classList.remove("flash"), 1500);
+}
+
+/* ---------------- evaluation ---------------- */
+
+function beginEvaluation() {
+  state.evalPending = true;
+  updateActionButtons();
+  return ++state.evalSeq;
+}
+
+async function runEvaluation() {
+  const seq = beginEvaluation();
+  let result = null;
   try {
-    await POST(`/api/procs/${id}/stop?force=${force}`, {});
-    toast(force ? "Killed" : "Stop signal sent");
-  } catch (e) {
-    toast(e.message, true);
+    result = await POST("/api/evaluate", { preset: state.preset, overrides: state.overrides });
+  } catch (error) {
+    if (seq === state.evalSeq) showError(error.message);
   }
+  applyEvaluationResult(result, seq);
+}
+
+const scheduleEvaluate = debounce(runEvaluation, EVALUATE_DELAY);
+
+function applyEvaluationResult(result, seq) {
+  if (seq !== state.evalSeq) return;
+  state.evalPending = false;
+  state.evalValid = !!(result && result.valid);
+  state.diagnostics = result ? result.diagnostics || [] : [];
+  if (state.evalValid) {
+    state.evaluation = {
+      states: result.fields || {},
+      values: collectValues(result),
+      derived: result.derived || {},
+    };
+    renderDerived();
+  }
+  renderDiagnostics(result !== null);
+  $("#statesNote").hidden = state.evalValid || !state.evaluation;
+  refreshRows();
+  updateActionButtons();
+  refreshPreview();
+}
+
+function renderDiagnostics(answered) {
+  const list = $("#diagnostics");
+  list.textContent = "";
+  if (!state.diagnostics.length) {
+    const text = !answered ? "The last check did not complete." : state.evalValid ? "No problems found." : "No details.";
+    list.append(el("li", { class: "diag-empty" }, text));
+    return;
+  }
+  for (const diagnostic of state.diagnostics) {
+    const path = diagnosticPath(diagnostic.field);
+    const where = path || diagnostic.field;
+    const body = path
+      ? el("button", { type: "button", onclick: () => jumpToField(path) }, diagnostic.message, el("code", {}, where))
+      : el("span", { class: "text" }, diagnostic.message, where ? el("code", {}, where) : null);
+    list.append(el("li", { class: `diag ${diagnostic.severity}` }, el("span", { class: "severity" }, diagnostic.severity), body));
+  }
+}
+
+function formatDerived(value) {
+  if (value === true) return "on";
+  if (value === false) return "off";
+  if (value === null || value === undefined) return "not set";
+  return String(value);
+}
+
+function renderDerived() {
+  const list = $("#derived");
+  list.textContent = "";
+  const derived = state.evaluation?.derived || {};
+  for (const [key, value] of Object.entries(derived)) {
+    list.append(el("dt", {}, DERIVED_LABELS[key] || humanize(key)), el("dd", {}, formatDerived(value)));
+  }
+}
+
+async function refreshPreview() {
+  const seq = ++state.previewSeq;
+  try {
+    const result = await POST("/api/preview", { preset: state.preset, overrides: state.overrides, resume: state.resume });
+    if (seq === state.previewSeq) $("#cmdPreview").textContent = result.cmd;
+  } catch (error) {
+    if (seq === state.previewSeq) showError(error.message);
+  }
+}
+
+async function copyCommand() {
+  const node = $("#cmdPreview");
+  if (!node.textContent) return;
+  try {
+    await navigator.clipboard.writeText(node.textContent);
+    toast("Command copied.");
+  } catch (error) {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    toast("Copy failed. The command is selected. Press Ctrl+C.");
+  }
+}
+
+function updateActionButtons() {
+  const errors = state.diagnostics.filter((d) => d.severity === "error").length;
+  const jsonErrors = Object.keys(state.jsonErrors).length;
+  let reason = "";
+  if (!state.schema) reason = "Waiting for the settings to load.";
+  else if (jsonErrors) reason = `${plural(jsonErrors, "field has", "fields have")} invalid JSON.`;
+  else if (state.evalPending) reason = "Checking the configuration…";
+  else if (errors) reason = `Fix ${plural(errors, "error", "errors")} before you launch.`;
+  else if (!state.evalValid) reason = "The last check did not complete.";
+  $("#launchBtn").disabled = !!reason;
+  $("#savePresetBtn").disabled = !!reason;
+  $("#launchHint").textContent = reason;
+}
+
+/* ---------------- launch and save ---------------- */
+
+async function launch() {
+  $("#launchBtn").disabled = true;
+  try {
+    const result = await POST("/api/launch", { preset: state.preset, overrides: state.overrides, resume: state.resume });
+    toast(`Started ${result.proc.label}.`);
+    state.procs = [result.proc, ...state.procs.filter((p) => p.id !== result.proc.id)];
+    selectProc(result.proc.id);
+    switchTab("console");
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    updateActionButtons();
+  }
+}
+
+function openSavePreset() {
+  $("#savePresetName").value = "";
+  $("#savePresetDescription").value = "";
+  $("#savePresetError").hidden = true;
+  $("#savePresetDialog").showModal();
+}
+
+async function savePreset(event) {
+  event.preventDefault();
+  const errorNode = $("#savePresetError");
+  const confirmButton = $("#savePresetConfirm");
+  const name = $("#savePresetName").value.trim();
+  confirmButton.disabled = true;
+  try {
+    const result = await POST("/api/presets", {
+      name,
+      description: $("#savePresetDescription").value.trim(),
+      preset: state.preset,
+      overrides: state.overrides,
+    });
+    $("#savePresetDialog").close();
+    toast(`Saved ${result.path}.`);
+    const kept = state.overrides;
+    state.overrides = {};
+    state.jsonErrors = {};
+    state.schemaCache = {};
+    await loadPresets();
+    const ok = await selectPreset(name);
+    if (!ok) {
+      state.overrides = kept;
+      afterChange();
+      return;
+    }
+    persistState();
+  } catch (error) {
+    errorNode.textContent = error.message;
+    errorNode.hidden = false;
+  } finally {
+    confirmButton.disabled = false;
+  }
+}
+
+/* ---------------- console ---------------- */
+
+function statusKind(status) {
+  if (status === "running" || status === "finished") return status;
+  return status.startsWith("exited") ? "exited" : "stopped";
 }
 
 async function pollProcs() {
   try {
-    const r = await GET("/api/procs");
-    state.procs = r.procs;
-    const running = r.procs.filter((p) => p.status === "running");
-    const sims = running.filter((p) => p.kind === "sim");
-    const chip = $("#run-chip");
-    if (sims.length) {
-      chip.classList.remove("hidden", "dead");
-      chip.textContent = `${sims.map((p) => p.label).join(", ")} running`;
-    } else {
-      chip.classList.add("hidden");
+    state.procs = (await GET("/api/procs")).procs;
+  } catch (error) {
+    if (error.message !== state.pollError) {
+      state.pollError = error.message;
+      showError(error.message);
     }
-    $("#console-badge").textContent = running.length || "";
-    $("#console-badge").classList.toggle("live", running.length > 0);
-    const vizLink = $("#viz-link");
-    vizLink.classList.toggle("hidden", !r.viz_up);
-    vizLink.href = `http://127.0.0.1:${state.settings?.viz_port || 8000}`;
-    if ($("#tab-console").classList.contains("active")) renderProcs();
-  } catch (e) { /* server restarting */ }
+    return;
+  }
+  if (state.pollError !== null) {
+    if ($("#errorText").textContent === state.pollError) hideError();
+    state.pollError = null;
+  }
+  renderProcs();
 }
 
-let logBusy = false;
-async function pollLog() {
-  if (logBusy) return; // a response slower than the tick must not double-append
-  if (!$("#tab-console").classList.contains("active") || state.logProcId === null) return;
-  logBusy = true;
-  const procId = state.logProcId;
-  try {
-    const r = await GET(`/api/procs/${procId}/log?offset=${state.logOffset}`);
-    if (state.logProcId !== procId) return; // user switched logs mid-flight
-    if (r.text) {
-      state.logOffset = r.offset;
-      const view = $("#log-view");
-      view.textContent += r.text;
-      if (view.textContent.length > 400000) view.textContent = view.textContent.slice(-300000);
-      if ($("#log-follow").checked) view.scrollTop = view.scrollHeight;
-    }
-    $("#log-status").textContent = r.status;
-  } catch (e) { /* ignore */ } finally {
-    logBusy = false;
+function procNode(proc) {
+  let node = state.procNodes.get(proc.id);
+  if (node) return node;
+  const dot = el("span", { class: "dot", "aria-hidden": "true" });
+  const status = el("span", { class: "proc-status" });
+  const time = el("span", { class: "proc-time" });
+  const stopButton = el("button", { type: "button", onclick: () => stopProc(proc.id, false) }, "Stop");
+  const killButton = el("button", { type: "button", class: "danger-ghost", onclick: () => stopProc(proc.id, true) }, "Kill");
+  const label = el("span", { class: "proc-label" });
+  const cmd = el("code", { class: "proc-cmd" });
+  const li = el("li", { class: "proc", "data-id": String(proc.id) },
+    el("div", { class: "proc-head" }, dot, label, status, time),
+    cmd,
+    el("div", { class: "proc-actions" },
+      el("button", { type: "button", onclick: () => selectProc(proc.id) }, "View log"),
+      stopButton, killButton));
+  node = { li, dot, label, cmd, status, time, stopButton, killButton };
+  state.procNodes.set(proc.id, node);
+  return node;
+}
+
+function updateProcNode(proc) {
+  const node = procNode(proc);
+  const kind = statusKind(proc.status);
+  node.dot.className = `dot ${kind}`;
+  node.label.textContent = proc.label;
+  node.cmd.textContent = proc.cmd;
+  node.cmd.title = proc.cmd;
+  node.status.textContent = proc.status;
+  node.time.textContent = `started ${formatTime(proc.started_at)}`;
+  node.stopButton.hidden = kind !== "running";
+  node.killButton.hidden = kind !== "running";
+  setAttr(node.li, "aria-current", proc.id === state.selectedProc ? "true" : null);
+}
+
+function renderProcs() {
+  const list = $("#procList");
+  const running = state.procs.filter((p) => p.status === "running").length;
+  const badge = $("#consoleBadge");
+  badge.textContent = running ? String(running) : "";
+  badge.classList.toggle("live", running > 0);
+  if (!state.procs.length) {
+    state.procNodes.clear();
+    list.textContent = "";
+    list.append(el("li", { class: "empty" }, "Nothing launched yet."));
+    return;
+  }
+  const wanted = state.procs.map((p) => p.id);
+  const current = Array.from(list.children).map((li) => Number(li.dataset.id));
+  const sameOrder = wanted.length === current.length && wanted.every((id, index) => id === current[index]);
+  if (!sameOrder) {
+    list.textContent = "";
+    for (const proc of state.procs) list.append(procNode(proc).li);
+  }
+  for (const proc of state.procs) updateProcNode(proc);
+  for (const id of [...state.procNodes.keys()]) {
+    if (!wanted.includes(id)) state.procNodes.delete(id);
   }
 }
 
-/* ---------------- launch ---------------- */
+function selectProc(id) {
+  state.selectedProc = id;
+  state.logSeq++;
+  state.logOffset = 0;
+  state.logDone = false;
+  state.logError = null;
+  $("#logView").textContent = "";
+  $("#logStatus").textContent = "";
+  const proc = state.procs.find((p) => p.id === id);
+  $("#logTitle").textContent = proc ? `Log of ${proc.label}` : "Log";
+  renderProcs();
+  pollLog();
+}
 
-async function launch() {
-  const btn = $("#launch-btn");
-  btn.disabled = true;
-  // open synchronously inside the click so popup blockers allow it; the
-  // real URL is filled in once the server answers
-  const vizWin = $("#opt-viz").checked ? window.open("", "_blank") : null;
+function dropLogSelection() {
+  state.selectedProc = null;
+  state.logSeq++;
+  $("#logTitle").textContent = "Log";
+  $("#logStatus").textContent = "";
+  renderProcs();
+}
+
+async function stopProc(id, force) {
   try {
-    const r = await POST("/api/launch", {
-      values: state.values,
-      resume: $("#opt-resume").checked,
-      launch_viz: $("#opt-viz").checked,
-    });
-    toast(`Launched ${r.proc.label} (pid log #${r.proc.id})`);
-    state.logProcId = r.proc.id;
-    state.logOffset = 0;
-    $("#log-view").textContent = "";
-    switchTab("console");
+    await POST(`/api/procs/${id}/stop?force=${force}`);
+    toast(force ? "Kill signal sent." : "Stop signal sent.");
     await pollProcs();
-    if (r.viz && vizWin) {
-      const delay = r.viz.started ? 1500 : 0;
-      setTimeout(() => { vizWin.location = r.viz.url; }, delay);
-    } else if (vizWin) {
-      vizWin.close();
-    }
-  } catch (e) {
-    if (vizWin) vizWin.close();
-    toast(`Launch failed: ${e.message}`, true);
-  } finally {
-    btn.disabled = false;
+  } catch (error) {
+    showError(error.message);
   }
 }
 
-async function saveConfig() {
-  const name = $("#config-name").value.trim();
-  if (!name) return toast("Give the config a name first", true);
+function scrollLogToEnd() {
+  const view = $("#logView");
+  view.scrollTop = view.scrollHeight;
+}
+
+function appendLog(text) {
+  const view = $("#logView");
+  view.textContent += text;
+  if (view.textContent.length > LOG_LIMIT) view.textContent = view.textContent.slice(-LOG_KEEP);
+  if (state.follow) scrollLogToEnd();
+}
+
+async function pollLog() {
+  if (state.logBusy || state.logDone || state.selectedProc === null || state.tab !== "console") return;
+  state.logBusy = true;
+  const id = state.selectedProc;
+  const seq = state.logSeq;
   try {
-    const r = await POST("/api/configs", {
-      name,
-      values: state.values,
-      launch_viz: $("#opt-viz").checked,
-      resume: $("#opt-resume").checked,
-    });
-    toast(`Saved ${r.path}`);
-    refreshConfigs();
-  } catch (e) {
-    toast(`Save failed: ${e.message}`, true);
+    const result = await GET(`/api/procs/${id}/log?offset=${state.logOffset}`);
+    if (seq !== state.logSeq) return;
+    state.logOffset = result.offset;
+    state.logError = null;
+    if (result.text) appendLog(result.text);
+    $("#logStatus").textContent = result.status;
+    if (result.status !== "running" && !result.text) state.logDone = true;
+  } catch (error) {
+    if (seq !== state.logSeq) return;
+    if (error.status === 404) {
+      dropLogSelection();
+      showError(`The log of process ${id} is not available: ${error.message}`);
+    } else if (error.message !== state.logError) {
+      state.logError = error.message;
+      showError(`The log of process ${id} could not be read: ${error.message}`);
+    }
+  } finally {
+    state.logBusy = false;
   }
 }
 
-/* ---------------- header / settings / tabs ---------------- */
-
-function renderHeader() {
-  const s = state.settings;
-  const repoName = s.repo.split("/").filter(Boolean).pop();
-  const chip = $("#target-chip");
-  chip.textContent = `${s.repo_ok ? "" : "⚠ "}${repoName} · ${s.python.split("/").slice(-3).join("/")}`;
-  chip.style.color = s.repo_ok && s.python_ok ? "" : "var(--status-critical)";
-  const keys = $("#key-chips");
-  const chipName = (k) => k === "AWS_BEARER_TOKEN_BEDROCK"
-    ? "bedrock" : k.replace("_API_KEY", "").toLowerCase();
-  keys.textContent = "";
-  for (const [k, on] of Object.entries(s.keys || {})) {
-    keys.append(el("span", { class: `chip ${on ? "on" : ""}`, title: on ? `${k} detected` : `${k} not set` },
-      `${on ? "✓" : "·"} ${chipName(k)}`));
-  }
-}
+/* ---------------- tabs, persistence, boot ---------------- */
 
 function switchTab(name) {
-  for (const t of $$(".tab")) t.classList.toggle("active", t.dataset.tab === name);
-  for (const p of $$(".tabpane")) p.classList.toggle("active", p.id === `tab-${name}`);
-  if (name === "scenario") initScenarioTab();
-  if (name === "console") renderProcs();
-}
-
-function hookPathCompletion(inputSel, listId, dirsOnly) {
-  const input = $(inputSel);
-  const dl = el("datalist", { id: listId });
-  document.body.append(dl);
-  input.setAttribute("list", listId);
-  input.addEventListener("input", debounce(async () => {
-    try {
-      const r = await GET(`/api/fs?prefix=${encodeURIComponent(input.value)}&dirs_only=${dirsOnly}`);
-      dl.textContent = "";
-      for (const p of r.paths) dl.append(el("option", { value: p }));
-    } catch (e) { /* completion is best-effort */ }
-  }, 150));
-}
-
-function openSettings() {
-  const s = state.settings;
-  $("#set-repo").value = s.repo;
-  $("#set-python").value = s.python;
-  $("#set-vizport").value = s.viz_port;
-  $("#settings-error").classList.add("hidden");
-  $("#settings-modal").showModal();
-}
-
-async function saveSettings() {
-  try {
-    state.settings = await POST("/api/settings", {
-      repo: $("#set-repo").value.trim(),
-      python: $("#set-python").value.trim(),
-      viz_port: parseInt($("#set-vizport").value, 10) || 8000,
-    });
-    $("#settings-modal").close();
-    renderHeader();
-    await loadSchema(true);
-    // everything else derived from the repo is stale now too
-    refreshConfigs();
-    fillFileSelect("personas", "#personas-files");
-    fillFileSelect("artifacts", "#artifacts-files");
-    designerLoaded = false;
-    state.prompts = null;
-    if ($("#tab-scenario").classList.contains("active")) initScenarioTab();
-  } catch (e) {
-    const err = $("#settings-error");
-    err.textContent = e.message;
-    err.classList.remove("hidden");
+  state.tab = name;
+  for (const tab of $$(".tab")) tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
+  $("#paneLaunch").hidden = name !== "launch";
+  $("#paneConsole").hidden = name !== "console";
+  if (name === "console") {
+    pollProcs();
+    pollLog();
   }
 }
 
-async function loadSchema(refresh = false) {
-  try {
-    state.schema = await GET(`/api/schema${refresh ? "?refresh=1" : ""}`);
-  } catch (e) {
-    state.schema = { groups: [], errors: [e.message] };
-  }
-  renderParams();
+function onTabKey(event) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  const tabs = $$(".tab");
+  const index = tabs.indexOf(document.activeElement);
+  if (index < 0) return;
+  const next = tabs[(index + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+  next.focus();
+  switchTab(next.dataset.tab);
 }
 
-/* ---------------- boot ---------------- */
+function formState() {
+  return { preset: state.preset, overrides: state.overrides, resume: state.resume };
+}
+
+const persistState = debounce(async () => {
+  try {
+    await POST("/api/state", formState());
+  } catch (error) {
+    showError(error.message);
+  }
+}, PERSIST_DELAY);
+
+function persistOnHide() {
+  if (!navigator.sendBeacon) return;
+  navigator.sendBeacon("/api/state", new Blob([JSON.stringify(formState())], { type: "application/json" }));
+}
+
+function bindEvents() {
+  $("#errorDismiss").addEventListener("click", hideError);
+  $("#settingsBtn").addEventListener("click", openSettings);
+  $("#settingsCancel").addEventListener("click", () => $("#settingsDialog").close());
+  $("#settingsForm").addEventListener("submit", saveSettings);
+  bindPathCompletion($("#settingsWorkdir"), $("#workdirList"), true);
+  bindPathCompletion($("#settingsPython"), $("#pythonList"), false);
+  for (const tab of $$(".tab")) tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+  $(".tabs").addEventListener("keydown", onTabKey);
+  $("#presetSelect").addEventListener("change", onPresetChange);
+  $("#searchBox").addEventListener("input", (event) => {
+    state.search = event.target.value;
+    state.pinned = null;
+    refreshRows();
+  });
+  $("#showInactive").addEventListener("change", (event) => {
+    state.showInactive = event.target.checked;
+    refreshRows();
+  });
+  $("#resetAll").addEventListener("click", resetAll);
+  $("#resumeSwitch").addEventListener("change", (event) => {
+    state.resume = event.target.checked;
+    persistState();
+    refreshPreview();
+  });
+  $("#form").addEventListener("focusout", () => refreshRows());
+  $("#copyCmd").addEventListener("click", copyCommand);
+  $("#savePresetBtn").addEventListener("click", openSavePreset);
+  $("#savePresetCancel").addEventListener("click", () => $("#savePresetDialog").close());
+  $("#savePresetForm").addEventListener("submit", savePreset);
+  $("#launchBtn").addEventListener("click", launch);
+  $("#followSwitch").addEventListener("change", (event) => {
+    state.follow = event.target.checked;
+    if (state.follow) scrollLogToEnd();
+  });
+  $("#logView").addEventListener("wheel", (event) => {
+    if (event.deltaY < 0 && state.follow) {
+      state.follow = false;
+      $("#followSwitch").checked = false;
+    }
+  });
+  $("#clearLog").addEventListener("click", () => { $("#logView").textContent = ""; });
+  window.addEventListener("pagehide", persistOnHide);
+}
 
 async function boot() {
-  const theme = localStorage.getItem("tl-launcher-theme");
-  if (theme) document.documentElement.dataset.theme = theme;
-
-  state.settings = await GET("/api/settings").catch(() => null);
-  if (state.settings) {
-    state.values = state.settings.last_values || {};
-    renderHeader();
+  bindEvents();
+  try {
+    state.settings = await GET("/api/settings");
+  } catch (error) {
+    showError(error.message);
   }
-
-  $("#theme-toggle").addEventListener("click", () => {
-    const cur = document.documentElement.dataset.theme === "light" ? "" : "light";
-    if (cur) document.documentElement.dataset.theme = cur;
-    else delete document.documentElement.dataset.theme;
-    localStorage.setItem("tl-launcher-theme", cur);
-  });
-  $("#target-chip").addEventListener("click", openSettings);
-  $("#settings-cancel").addEventListener("click", () => $("#settings-modal").close());
-  $("#settings-save").addEventListener("click", saveSettings);
-  hookPathCompletion("#set-repo", "fs-repo-list", true);
-  hookPathCompletion("#set-python", "fs-python-list", false);
-
-  for (const t of $$(".tab")) t.addEventListener("click", () => switchTab(t.dataset.tab));
-
-  $("#param-search").addEventListener("input", applyParamFilter);
-  $("#changed-only").addEventListener("change", applyParamFilter);
-  $("#reset-all").addEventListener("click", () => {
-    if (!confirm("Reset every parameter to its default?")) return;
-    state.values = {};
-    renderParams();
-  });
-  $("#opt-resume").addEventListener("change", refreshPreview);
-  $("#cmd-copy").addEventListener("click", () => {
-    navigator.clipboard.writeText($("#cmd-preview").textContent);
-    toast("Command copied");
-  });
-  $("#launch-btn").addEventListener("click", launch);
-  $("#save-config").addEventListener("click", saveConfig);
-  $("#config-select").addEventListener("change", (e) => {
-    if (e.target.value) loadConfig(e.target.value);
-    e.target.value = "";
-  });
-  $("#config-reload").addEventListener("click", refreshConfigs);
-
-  $("#personas-add").addEventListener("click", () => {
-    state.personas.push({ persona: "", name: "", role: "", count: 1 });
-    renderPersonas();
-  });
-  $("#personas-save").addEventListener("click", () => saveEditorFile("personas"));
-  $("#personas-rescan").addEventListener("click", () => fillFileSelect("personas", "#personas-files"));
-  $("#personas-files").addEventListener("change", async (e) => {
-    if (!e.target.value) return;
-    try {
-      state.personas = (await loadJsonFile(e.target.value)).map(normalizePersona);
-      $("#personas-path").value = e.target.value;
-      renderPersonas();
-    } catch (err) {
-      toast(`Could not load: ${err.message}`, true);
-    }
-    e.target.value = "";
-  });
-
-  $("#artifacts-add").addEventListener("click", () => {
-    state.artifacts.push(normalizeArtifact({ name: "" }));
-    renderArtifacts();
-  });
-  $("#artifacts-save").addEventListener("click", () => saveEditorFile("artifacts"));
-  $("#artifacts-rescan").addEventListener("click", () => fillFileSelect("artifacts", "#artifacts-files"));
-  $("#artifacts-files").addEventListener("change", async (e) => {
-    if (!e.target.value) return;
-    try {
-      state.artifacts = (await loadJsonFile(e.target.value)).map(normalizeArtifact);
-      $("#artifacts-path").value = e.target.value;
-      renderArtifacts();
-    } catch (err) {
-      toast(`Could not load: ${err.message}`, true);
-    }
-    e.target.value = "";
-  });
-
-  $("#design-btn").addEventListener("click", runDesign);
-  $("#apply-all-params").addEventListener("click", () => {
-    const n = state.paramAppliers?.length || 0;
-    (state.paramAppliers || []).forEach((apply) => apply());
-    renderParams();
-    const btn = $("#apply-all-params");
-    btn.textContent = "✓ all applied";
-    btn.disabled = true;
-    toast(`Applied ${n} suggested parameter${n === 1 ? "" : "s"} to the launch form`);
-  });
-  $("#refine-btn").addEventListener("click", runRefine);
-  $("#refine-undo").addEventListener("click", refineUndo);
-  $("#refine-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") runRefine();
-  });
-  $("#designer-model").addEventListener("change", (e) => {
-    POST("/api/state", { last_model: e.target.value }).catch(() => {});
-  });
-  $("#apply-personas").addEventListener("click", () => {
-    if (!state.design) return;
-    state.personas = state.design.personas.map(normalizePersona);
-    renderPersonas();
-    switchTab("personas");
-    toast("Personas moved to the editor — save there to use them");
-  });
-  $("#apply-artifacts").addEventListener("click", () => {
-    if (!state.design) return;
-    state.artifacts = state.design.init_artifacts.map(normalizeArtifact);
-    renderArtifacts();
-    switchTab("artifacts");
-    toast("Artifacts moved to the editor — save there to use them");
-  });
-  $("#bundle-save").addEventListener("click", saveBundle);
-  $("#bundle-download").addEventListener("click", downloadBundle);
-
-  $("#log-select").addEventListener("change", (e) => {
-    state.logProcId = parseInt(e.target.value, 10);
-    state.logOffset = 0;
-    $("#log-view").textContent = "";
-  });
-
-  await loadSchema();
-  await refreshConfigs();
-  await restoreEditorsFromValues();
-  fillFileSelect("personas", "#personas-files");
-  fillFileSelect("artifacts", "#artifacts-files");
-  refreshPreview();
-
+  renderHeader();
+  const last = state.settings?.last || {};
+  state.overrides = isPlainObject(last.overrides) ? last.overrides : {};
+  state.resume = !!last.resume;
+  $("#resumeSwitch").checked = state.resume;
+  await loadPresets();
+  const found = state.presets.some((p) => p.name === last.preset);
+  const wanted = found ? last.preset : null;
+  if (last.preset && !found) {
+    state.overrides = {};
+    toast(`The saved preset "${last.preset}" was not found. Starting from the defaults.`);
+  }
+  await selectPreset(wanted);
+  if (!state.schema && wanted) await selectPreset(null);
   pollProcs();
   setInterval(pollProcs, 2000);
   setInterval(pollLog, 1000);

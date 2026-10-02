@@ -1,8 +1,6 @@
-"""TerraLingua launcher: a web UI that replaces the launch shell scripts.
+"""TerraLingua launcher: a web page that configures and launches simulations.
 
-Independent of the TerraLingua codebase — it introspects a target checkout's
-config dataclasses with the target's own interpreter, so params added or
-removed upstream appear or vanish from the UI without touching the launcher.
+It never imports TerraLingua. It asks the interpreter that runs the simulations
+for the fields, their dependencies and the state of a configuration, through
+TerraLingua's own configuration commands.
 """
-
-__version__ = "0.1.0"

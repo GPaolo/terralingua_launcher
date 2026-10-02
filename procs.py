@@ -1,13 +1,13 @@
-"""Child-process registry: the simulation and the viz dashboard.
+"""Child-process registry for launched simulations.
 
-Each child gets its own session (killpg reaches ffmpeg and friends) and its
-stdout/stderr appended to a log file under <repo>/logs/_launcher/, which the
-dashboard skips (it only lists dirs holding a params.json).
+Each child gets its own session, so stopping it reaches every process it
+started, and its output goes to a log file under <workdir>/logs/_launcher/.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import threading
@@ -18,10 +18,20 @@ from pathlib import Path
 LOG_CHUNK = 64 * 1024
 
 
+def _without_partial_char(data: bytes) -> bytes:
+    """Drop a trailing incomplete UTF-8 sequence so the next read gets it whole."""
+    for back in range(1, min(3, len(data)) + 1):
+        lead = data[-back]
+        if lead & 0xC0 == 0x80:  # a continuation byte: its lead byte is further back
+            continue
+        length = 2 if lead & 0xE0 == 0xC0 else 3 if lead & 0xF0 == 0xE0 else 4 if lead & 0xF8 == 0xF0 else 1
+        return data[:-back] if length > back else data
+    return data
+
+
 @dataclass
 class Proc:
     id: int
-    kind: str  # "sim" | "viz"
     label: str
     argv: list
     cwd: str
@@ -33,15 +43,15 @@ class Proc:
         rc = self.popen.poll()
         if rc is None:
             return "running"
-        clean = rc in (0, -signal.SIGTERM, -signal.SIGKILL)
-        return "stopped" if clean else f"exited ({rc})"
+        if rc == 0:
+            return "finished"
+        return "stopped" if rc in (-signal.SIGTERM, -signal.SIGKILL) else f"exited ({rc})"
 
     def as_dict(self) -> dict:
         return {
             "id": self.id,
-            "kind": self.kind,
             "label": self.label,
-            "cmd": " ".join(map(str, self.argv)),
+            "cmd": shlex.join(self.argv),
             "status": self.status(),
             "returncode": self.popen.poll(),
             "started_at": self.started_at,
@@ -56,32 +66,37 @@ class ProcRegistry:
         # endpoints run in FastAPI's threadpool; id allocation must be atomic
         self._lock = threading.Lock()
 
-    def spawn(self, kind: str, label: str, argv: list, cwd: Path) -> Proc:
+    def spawn(self, label: str, argv: list, cwd: Path, env: dict | None = None) -> Proc:
+        """Start a child; an OSError means it could not start and leaves no log behind."""
         with self._lock:
             proc_id = self._next_id
             self._next_id += 1
+        argv = [str(a) for a in argv]
         log_dir = Path(cwd) / "logs" / "_launcher"
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)[:60]
-        log_path = log_dir / f"{stamp}_{kind}_{safe}.log"
-        log_file = open(log_path, "ab")
-        log_file.write((" ".join(map(str, argv)) + "\n\n").encode())
-        log_file.flush()
-        popen = subprocess.Popen(
-            [str(a) for a in argv],
-            cwd=str(cwd),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        log_file.close()  # the child holds its own copy of the fd
+        log_path = log_dir / f"{stamp}_{proc_id}_{safe}.log"
+        with open(log_path, "ab") as log_file:
+            log_file.write((shlex.join(argv) + "\n\n").encode())
+            log_file.flush()
+            try:
+                popen = subprocess.Popen(
+                    argv,
+                    cwd=str(cwd),
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError:
+                log_path.unlink(missing_ok=True)
+                raise
         proc = Proc(
             id=proc_id,
-            kind=kind,
             label=label,
-            argv=[str(a) for a in argv],
+            argv=argv,
             cwd=str(cwd),
             log_path=str(log_path),
             popen=popen,
@@ -95,13 +110,6 @@ class ProcRegistry:
     def list(self) -> list[dict]:
         return [p.as_dict() for p in sorted(self._procs.values(), key=lambda p: -p.id)]
 
-    def running(self, kind: str | None = None) -> list[Proc]:
-        return [
-            p
-            for p in self._procs.values()
-            if p.popen.poll() is None and (kind is None or p.kind == kind)
-        ]
-
     def stop(self, proc_id: int, force: bool = False) -> bool:
         proc = self._procs.get(proc_id)
         if proc is None or proc.popen.poll() is not None:
@@ -112,10 +120,6 @@ class ProcRegistry:
         except (ProcessLookupError, PermissionError):
             proc.popen.terminate()
         return True
-
-    def stop_all(self):
-        for p in self.running():
-            self.stop(p.id)
 
     def read_log(self, proc_id: int, offset: int = 0) -> dict:
         proc = self._procs.get(proc_id)
@@ -132,6 +136,8 @@ class ProcRegistry:
                     offset = size - LOG_CHUNK  # first read: tail, don't replay all
                 f.seek(offset)
                 data = f.read(LOG_CHUNK)
+                if proc.popen.poll() is None:
+                    data = _without_partial_char(data)
                 offset += len(data)
                 text = data.decode("utf-8", errors="replace")
         except OSError:
