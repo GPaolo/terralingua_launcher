@@ -56,7 +56,11 @@ Launched runs and scenario tools, their status, and their live output. A tool sh
 
 ## Scenario tools
 
-A scenario may ship a viewer or an anthropologist as a subpackage with that name, runnable as `python -m <scenario>.viewer --logs <folder> --port <n>`. TerraLingua reports them for a preset. The Launch tab then shows an "Open viewer" or "Open anthropologist" button, which starts the tool on a free port with the working directory's `logs/` folder and lists it in the Console with a link to its page.
+A scenario may ship a viewer or an anthropologist as a subpackage with that name, runnable as `python -m <scenario>.viewer --logs <folder> --port <n>`. TerraLingua reports them for a preset. The Launch tab then shows an "Open viewer" or "Open anthropologist" button, which starts the tool with the working directory's `logs/` folder and lists it in the Console with a link to its page.
+
+By default a tool takes any free port. When you use the launcher through a forwarded port, set the ports the tools may use in the Settings panel, for example `8990`, and forward them too.
+
+Runs and tools keep going when the launcher stops. After a restart they are not listed in the Console; stop them from a terminal.
 
 ## Keys
 
@@ -69,4 +73,4 @@ pip install -e '.[test]'
 pytest
 ```
 
-The server tests drive a real TerraLingua checkout. Set `TL_LAUNCHER_TEST_WORKDIR` to its path.
+The server tests drive a real TerraLingua installation. Set `TL_LAUNCHER_TEST_WORKDIR` to a checkout that holds the `example` scenario to run the scenario tests too.

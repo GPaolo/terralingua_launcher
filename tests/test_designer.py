@@ -1,6 +1,7 @@
 import json
 import sys
 
+import litellm
 import pytest
 from fastapi.testclient import TestClient
 
@@ -80,11 +81,22 @@ def test_problems_are_named():
 
 
 def test_the_key_follows_the_model_provider():
-    env = {"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}
+    env = {"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o", "AWS_BEARER_TOKEN_BEDROCK": "b"}
     assert designer.key_for("claude-opus-5-5", env) == "a"
-    assert designer.key_for("gpt-5", env) == "o"
-    assert designer.key_for("mistral/large", env) is None
+    assert designer.key_for("anthropic/claude-opus-5-5", env) == "a"
+    assert designer.key_for("openai/gpt-5", env) == "o"
+    assert designer.key_for("bedrock/anthropic.claude-3", env) == "b"
+    assert designer.key_for("gemini/gemini-pro", env) is None
+    assert designer.key_for("nonsense-model", env) is None
     assert designer.key_for("claude-opus-5-5", {}) is None
+
+
+def test_the_default_model_accepts_the_call_parameters():
+    """litellm checks the parameters before it sends anything; a mock response keeps it offline."""
+    response = litellm.completion(
+        model=designer.DEFAULT_MODEL, messages=[{"role": "user", "content": "hi"}], mock_response="ok",
+    )
+    assert response.choices[0].message.content == "ok"
 
 
 def test_design_asks_the_model_once_and_checks_the_reply():

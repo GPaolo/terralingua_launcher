@@ -2,11 +2,12 @@
 
 The interpreter running the tests must have terralingua installed. The
 working directory defaults to the current folder; set TL_LAUNCHER_TEST_WORKDIR
-to a TerraLingua checkout to also cover a preset with a scenario (ebola).
+to a TerraLingua checkout to also cover a preset with a scenario (example).
 """
 
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -24,7 +25,6 @@ INSTALLED = target.version(sys.executable, WORKDIR) is not None
 PRESETS = {p["name"] for p in target.presets(sys.executable, WORKDIR)} if INSTALLED else set()
 
 pytestmark = pytest.mark.skipif(not INSTALLED, reason="terralingua is not installed in this interpreter")
-needs_ebola = pytest.mark.skipif("ebola" not in PRESETS, reason="the ebola preset is not in the working directory")
 needs_example = pytest.mark.skipif("example" not in PRESETS, reason="the example preset is not in the working directory")
 
 # config commands go to the real interpreter; a run or a tool only echoes its arguments
@@ -57,8 +57,9 @@ def fake_python(tmp_path):
 
 @pytest.fixture
 def sleeping_python(tmp_path):
-    """Like fake_python, but a run keeps going until it is stopped."""
-    return executable(tmp_path / "sleeping_python.sh", FAKE_RUN.format("sleep 60") + f'exec {sys.executable} "$@"\n')
+    """Like fake_python, but a run keeps going until it is stopped, and then exits cleanly like a real run."""
+    body = FAKE_RUN.format("trap 'exit 0' TERM; sleep 60 & wait $!") + f'exec {sys.executable} "$@"\n'
+    return executable(tmp_path / "sleeping_python.sh", body)
 
 
 @pytest.fixture
@@ -123,16 +124,31 @@ def test_cross_origin_requests_are_refused(client):
     assert client.post("/api/state", json={}, headers={"Origin": "http://testserver"}).status_code == 200
 
 
+def test_requests_for_another_host_are_refused(client):
+    headers = {"Host": "evil.example:7000", "Origin": "http://evil.example:7000"}
+    assert client.post("/api/state", json={}, headers=headers).status_code == 400
+    assert client.get("/api/settings", headers={"Host": "localhost:7000"}).status_code == 200
+
+
+def test_tool_ports_are_a_setting(client):
+    assert client.get("/api/settings").json()["tool_ports"] == []
+    assert client.post("/api/settings", json={"tool_ports": " 8990, 8991 "}).json()["tool_ports"] == [8990, 8991]
+    assert client.post("/api/settings", json={"tool_ports": [8992]}).json()["tool_ports"] == [8992]
+    assert client.post("/api/settings", json={"tool_ports": "80"}).status_code == 400
+    assert client.post("/api/settings", json={"tool_ports": "abc"}).status_code == 400
+    assert client.post("/api/settings", json={"tool_ports": ""}).json()["tool_ports"] == []
+
+
 def test_presets_include_the_builtins(client):
     presets = {p["name"]: p for p in client.get("/api/presets").json()["presets"]}
     assert presets["core"]["location"] == "(built-in)"
     assert presets["grid_baseline"]["description"]
 
 
-@needs_ebola
+@needs_example
 def test_presets_include_the_working_directory(client):
     presets = {p["name"]: p for p in client.get("/api/presets").json()["presets"]}
-    assert presets["ebola"]["location"].endswith("ebola.preset.yaml")
+    assert presets["example"]["location"].endswith("example.preset.yaml")
 
 
 def test_a_broken_preset_file_is_reported_as_a_request_error(workdir, state_path):
@@ -154,13 +170,13 @@ def test_schema_lists_grouped_fields(client):
     assert data.get("scenario") is None
 
 
-@needs_ebola
+@needs_example
 def test_schema_with_a_preset_describes_its_scenario(client):
-    data = client.get("/api/schema", params={"preset": "ebola"}).json()
+    data = client.get("/api/schema", params={"preset": "example"}).json()
     scenario = data["scenario"]
-    assert scenario["module"] == "scenarios.ebola"
-    assert scenario["fields"]["run.scenario_options.burials"]["type"] == "bool"
-    assert "run.scenario_options.health_center.radius" in scenario["fields"]
+    assert scenario["module"] == "scenarios.example"
+    assert scenario["fields"]["run.scenario_options.period"]["type"] == "int"
+    assert scenario["tools"]["viewer"] == "scenarios.example.viewer"
 
 
 def test_schema_rejects_an_unknown_preset(client):
@@ -192,34 +208,32 @@ def test_overrides_must_be_an_object(client):
         assert "overrides" in response.json()["detail"]
 
 
-@needs_ebola
+@needs_example
 def test_evaluate_merges_scenario_options(client):
     overrides = {
-        "run.scenario_options.burials": False,
-        "run.scenario_options.health_center.radius": 3,
-        "run.scenario_options": {"lifespan": 20},
+        "run.scenario_options.period": 7,
+        "run.scenario_options": {"watchers": 2},
     }
-    data = client.post("/api/evaluate", json={"preset": "ebola", "overrides": overrides}).json()
+    data = client.post("/api/evaluate", json={"preset": "example", "overrides": overrides}).json()
     assert data["valid"], data["diagnostics"]
     options = data["resolved"]["run"]["scenario_options"]
-    assert options["burials"] is False
-    assert options["health_center"]["radius"] == 3
-    assert options["lifespan"] == 20
-    assert options["ppe_role"] == "health_worker"  # untouched preset values stay
+    assert options["period"] == 7
+    assert options["watchers"] == 2
+    assert options["duration"] == 2  # untouched preset values stay
 
 
-@needs_ebola
+@needs_example
 def test_preview_builds_the_terralingua_command(client):
     body = {
-        "preset": "ebola",
-        "overrides": {"env.grid_size": 12, "run.scenario_options.burials": False},
+        "preset": "example",
+        "overrides": {"env.grid_size": 12, "run.scenario_options.period": 7},
         "resume": True,
     }
     data = client.post("/api/preview", json=body).json()
     assert data["argv"] == [
-        "ebola", "--scenario_options", '{"burials": false}', "--grid_size", "12", "--resume",
+        "example", "--scenario_options", '{"period": 7}', "--grid_size", "12", "--resume",
     ]
-    assert data["cmd"].startswith(sys.executable + " -m terralingua ebola ")
+    assert data["cmd"].startswith(sys.executable + " -m terralingua example ")
 
 
 @pytest.mark.parametrize(
@@ -234,9 +248,9 @@ def test_preview_builds_the_terralingua_command(client):
             },
         ),
         pytest.param(
-            "ebola",
-            {"run.scenario_options.burials": False, "run.scenario_options.health_center.radius": 3, "env.grid_size": 9},
-            marks=needs_ebola,
+            "example",
+            {"run.scenario_options.period": 7, "run.scenario_options.watchers": 2, "env.grid_size": 9},
+            marks=needs_example,
         ),
     ],
 )
@@ -366,3 +380,20 @@ def test_a_scenario_viewer_starts_on_a_free_port(fake_python, state_path):
         response = client.post("/api/tools/anthropologist", json={"preset": "example"})
         assert response.status_code == 400
         assert "no anthropologist" in response.json()["detail"]
+
+
+@needs_example
+def test_a_tool_takes_the_first_free_configured_port(fake_python, state_path):
+    with TestClient(server.create_app(WORKDIR, fake_python, state_path)) as client:
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            busy = taken.getsockname()[1]
+            spare = server.free_port()
+            client.post("/api/settings", json={"tool_ports": [busy, spare]})
+            data = client.post("/api/tools/viewer", json={"preset": "example"}).json()
+            assert data["url"] == f"http://127.0.0.1:{spare}"
+            wait_until_done(client, data["proc"]["id"])
+            client.post("/api/settings", json={"tool_ports": [busy]})
+            response = client.post("/api/tools/viewer", json={"preset": "example"})
+            assert response.status_code == 400
+            assert "in use" in response.json()["detail"]

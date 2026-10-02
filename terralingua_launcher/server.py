@@ -20,6 +20,7 @@ from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from terralingua_launcher import command, content, designer, store, target
 from terralingua_launcher.procs import ProcRegistry
@@ -42,18 +43,42 @@ def resolve_python(python: str) -> str | None:
     return os.path.abspath(found) if found else None
 
 
+def port_is_free(port: int) -> bool:
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+        return True
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
+def tool_ports_of(value) -> list[int]:
+    """Ports for scenario tools, from a list or a comma-separated string; empty means any free port."""
+    items = value.split(",") if isinstance(value, str) else (value or [])
+    ports = []
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        if not text.isdigit() or not 1024 <= int(text) <= 65535:
+            raise ValueError(f"'{text}' is not a port between 1024 and 65535")
+        ports.append(int(text))
+    return ports
+
+
 def create_app(
     workdir: Path | None = None, python: str | None = None, state_path: Path | None = None,
-    complete=designer.litellm_complete,
+    complete=designer.litellm_complete, host: str = "127.0.0.1",
 ) -> FastAPI:
     """The app. `complete(model, messages, api_key) -> str` asks the designer's model."""
     app = FastAPI(title="TerraLingua Launcher")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver", host])
     app.state.file = store.StateFile(state_path)
     state = app.state.file.load()
     app.state.workdir = Path(workdir or state.get("workdir") or Path.cwd()).expanduser().resolve()
@@ -61,6 +86,7 @@ def create_app(
     app.state.python = resolve_python(requested) or requested
     app.state.env = environment(app.state.workdir)
     app.state.last = state.get("last") or {}
+    app.state.tool_ports = tool_ports_of(state.get("tool_ports"))
     app.state.schema_cache = {}  # (python, workdir, preset) -> description
     app.state.procs = ProcRegistry()
 
@@ -75,6 +101,7 @@ def create_app(
         app.state.file.save({
             "workdir": str(app.state.workdir),
             "python": app.state.python,
+            "tool_ports": app.state.tool_ports,
             "last": app.state.last,
         })
 
@@ -122,6 +149,7 @@ def create_app(
             "terralingua_version": target.version(app.state.python, app.state.workdir, env=app.state.env) if ok else None,
             "launcher_version": target.launcher_version(),
             "keys": {k: bool(app.state.env.get(k)) for k in KEY_VARS},
+            "tool_ports": app.state.tool_ports,
             "last": app.state.last,
         }
 
@@ -136,10 +164,17 @@ def create_app(
             python = resolve_python(str(body["python"]))
             if python is None:
                 raise HTTPException(400, f"{body['python']} is not an executable file")
+        tool_ports = app.state.tool_ports
+        if "tool_ports" in body:
+            try:
+                tool_ports = tool_ports_of(body["tool_ports"])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         env = environment(workdir)
         if target.version(python, workdir, env=env) is None:
             raise HTTPException(400, f"{python} has no terralingua installed")
         app.state.workdir, app.state.python, app.state.env = workdir, python, env
+        app.state.tool_ports = tool_ports
         app.state.schema_cache = {}
         persist()
         return get_settings()
@@ -335,7 +370,12 @@ def create_app(
         if not module:
             raise HTTPException(400, f"the preset has no {name}")
         logs = app.state.env.get("TL_LOGS_DIR") or str(app.state.workdir / "logs")
-        port = free_port()
+        if app.state.tool_ports:
+            port = next((p for p in app.state.tool_ports if port_is_free(p)), None)
+            if port is None:
+                raise HTTPException(400, "every tool port is in use; stop a tool first or add a port in Settings")
+        else:
+            port = free_port()
         url = f"http://127.0.0.1:{port}"
         argv = [app.state.python, "-m", module, "--logs", logs, "--port", str(port)]
         try:
@@ -378,7 +418,7 @@ def main():
     parser.add_argument("--port", type=int, default=7000)
     args = parser.parse_args()
 
-    app = create_app(args.workdir, args.python)
+    app = create_app(args.workdir, args.python, host=args.host)
     print(f"TerraLingua launcher: http://{args.host}:{args.port}")
     print(f"working directory {app.state.workdir}, interpreter {app.state.python}")
     if target.version(app.state.python, app.state.workdir, env=app.state.env) is None:

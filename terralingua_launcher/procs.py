@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from terralingua_launcher.store import slug
+
 LOG_CHUNK = 64 * 1024
 
 
@@ -34,19 +36,19 @@ class Proc:
     id: int
     label: str
     argv: list
-    cwd: str
     log_path: str
     popen: subprocess.Popen = field(repr=False)
     url: str | None = None
     started_at: float = field(default_factory=time.time)
+    stop_requested: bool = False
 
     def status(self) -> str:
         rc = self.popen.poll()
         if rc is None:
             return "running"
-        if rc == 0:
-            return "finished"
-        return "stopped" if rc in (-signal.SIGTERM, -signal.SIGKILL) else f"exited ({rc})"
+        if self.stop_requested or rc in (-signal.SIGTERM, -signal.SIGKILL):
+            return "stopped"
+        return "finished" if rc == 0 else f"exited ({rc})"
 
     def as_dict(self) -> dict:
         return {
@@ -77,8 +79,7 @@ class ProcRegistry:
         log_dir = Path(cwd) / "logs" / "_launcher"
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)[:60]
-        log_path = log_dir / f"{stamp}_{proc_id}_{safe}.log"
+        log_path = log_dir / f"{stamp}_{proc_id}_{slug(label)}.log"
         with open(log_path, "ab") as log_file:
             log_file.write((shlex.join(argv) + "\n\n").encode())
             log_file.flush()
@@ -99,7 +100,6 @@ class ProcRegistry:
             id=proc_id,
             label=label,
             argv=argv,
-            cwd=str(cwd),
             log_path=str(log_path),
             popen=popen,
             url=url,
@@ -117,6 +117,7 @@ class ProcRegistry:
         proc = self._procs.get(proc_id)
         if proc is None or proc.popen.poll() is not None:
             return False
+        proc.stop_requested = True
         sig = signal.SIGKILL if force else signal.SIGTERM
         try:
             os.killpg(os.getpgid(proc.popen.pid), sig)

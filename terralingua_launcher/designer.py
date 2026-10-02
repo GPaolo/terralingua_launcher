@@ -13,8 +13,8 @@ import litellm
 
 DEFAULT_MODEL = "claude-opus-5-5"
 
-#: environment variable that holds the key for a model name prefix
-KEY_VARS = {"claude": "ANTHROPIC_API_KEY", "gpt": "OPENAI_API_KEY", "o1": "OPENAI_API_KEY", "o3": "OPENAI_API_KEY", "o4": "OPENAI_API_KEY"}
+#: environment variable that holds the key of a provider, as litellm names providers
+KEY_VARS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "bedrock": "AWS_BEARER_TOKEN_BEDROCK"}
 
 REPLY_SHAPE = """{
   "instructions": "<Markdown text appended to every being's system prompt>",
@@ -40,10 +40,11 @@ Rules:
 
 def key_for(model: str, env: dict) -> str | None:
     """The key the environment holds for this model's provider, or None."""
-    for prefix, variable in KEY_VARS.items():
-        if model.startswith(prefix):
-            return env.get(variable) or None
-    return None
+    try:
+        provider = litellm.get_llm_provider(model)[1]
+    except Exception:  # litellm raises its own error for a name it does not know
+        return None
+    return env.get(KEY_VARS.get(provider, "")) or None
 
 
 def catalogue(fields: dict, values: dict) -> str:
@@ -160,7 +161,7 @@ def check_design(design: dict, context: dict) -> list[dict]:
 
 
 def litellm_complete(model: str, messages: list[dict], api_key: str | None) -> str:
-    response = litellm.completion(model=model, messages=messages, api_key=api_key, temperature=0.4)
+    response = litellm.completion(model=model, messages=messages, api_key=api_key)
     return response.choices[0].message.content or ""
 
 
