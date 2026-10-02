@@ -87,6 +87,7 @@ const state = {
   design: null,
   designBusy: false,
   designNameTouched: false,
+  loaded: false,
 };
 
 /* ---------------- small helpers ---------------- */
@@ -225,7 +226,7 @@ function toast(message) {
   node.textContent = message;
   node.hidden = false;
   clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => { node.hidden = true; }, 2500);
+  state.toastTimer = setTimeout(() => { node.hidden = true; }, Math.max(2500, message.length * 45));
 }
 
 /* ---------------- header and settings ---------------- */
@@ -264,6 +265,7 @@ function openSettings() {
   const settings = state.settings || {};
   $("#settingsWorkdir").value = settings.workdir || "";
   $("#settingsPython").value = settings.python || "";
+  $("#settingsToolPorts").value = (settings.tool_ports || []).join(", ");
   $("#settingsError").hidden = true;
   $("#settingsDialog").showModal();
 }
@@ -273,15 +275,24 @@ async function saveSettings(event) {
   const errorNode = $("#settingsError");
   const saveButton = $("#settingsSave");
   saveButton.disabled = true;
+  const previousWorkdir = state.settings?.workdir;
   try {
     state.settings = await POST("/api/settings", {
       workdir: $("#settingsWorkdir").value.trim(),
       python: $("#settingsPython").value.trim(),
+      tool_ports: $("#settingsToolPorts").value.trim(),
     });
     $("#settingsDialog").close();
     renderHeader();
     state.schemaCache = {};
     resetArtifactTypes();
+    if (state.settings.workdir !== previousWorkdir) {
+      for (const kind of Object.keys(CONTENT_KINDS)) {
+        state.content[kind] = { ...newContentState(), nodes: state.content[kind].nodes };
+        renderEntries(kind);
+        loadContentList(kind);
+      }
+    }
     await loadPresets();
     const preset = state.presets.some((p) => p.name === state.preset) ? state.preset : null;
     await selectPreset(preset, true);
@@ -309,13 +320,16 @@ function bindPathCompletion(input, list, dirsOnly) {
 /* ---------------- presets ---------------- */
 
 async function loadPresets() {
+  let ok = true;
   try {
     state.presets = (await GET("/api/presets")).presets;
   } catch (error) {
     state.presets = [];
+    ok = false;
     showError(error.message);
   }
   renderPresetOptions();
+  return ok;
 }
 
 function renderPresetOptions() {
@@ -410,6 +424,7 @@ async function selectPreset(name, refresh = false) {
     state.base = base;
     state.evaluation = null;
     state.pinned = null;
+    state.loaded = true;
     buildForm();
     if (state.tab === "artifacts") refreshArtifactTypes();
     refreshContentPanes();
@@ -626,9 +641,9 @@ function collectValues(result, fields = state.fields) {
 }
 
 function evaluatedValue(path) {
-  if (path in state.base) return state.base[path];
   const values = state.evaluation?.values;
-  if (values && path in values) return values[path];
+  if (state.evalValid && values && path in values) return values[path];
+  if (path in state.base) return state.base[path];
   return state.fields[path]?.default;
 }
 
@@ -1204,7 +1219,8 @@ async function startTool(name, button) {
   button.disabled = true;
   try {
     const result = await POST(`/api/tools/${encodeURIComponent(name)}`, { preset: state.preset });
-    toast(`Started ${result.proc.label} at ${result.url}.`);
+    const forwarded = state.settings?.tool_ports?.length ? "" : " If you work through forwarded ports, forward this one too.";
+    toast(`Started ${result.proc.label} at ${result.url}.${forwarded}`);
     showNewProc(result.proc);
   } catch (error) {
     showError(error.message);
@@ -1448,7 +1464,8 @@ function newPersonaEntry() {
 }
 
 function personaFromFile(raw) {
-  const { persona, name, count, ...rest } = isPlainObject(raw) ? raw : {};
+  const source = typeof raw === "string" ? { persona: raw } : isPlainObject(raw) ? raw : {};
+  const { persona, name, count, ...rest } = source;
   const entry = newPersonaEntry();
   if (persona !== undefined && persona !== null) entry.persona = String(persona);
   if (name !== undefined && name !== null) entry.name = String(name);
@@ -1866,20 +1883,24 @@ function confirmDiscard(kind, action) {
   return window.confirm(`The current ${CONTENT_KINDS[kind].one} has unsaved changes. ${action} and lose them?`);
 }
 
-async function loadContentItem(kind, name) {
+/* Shows a file's content ({name, path, data}) in the editor as the saved state. */
+function showContentItem(kind, result) {
   const ct = state.content[kind];
+  const data = Array.isArray(result.data) ? result.data : isPlainObject(result.data) ? [result.data] : [];
+  ct.name = result.name;
+  ct.path = result.path;
+  ct.entries = data.map((raw) => CONTENT_MODEL[kind].fromFile(raw));
+  ct.savedText = JSON.stringify(serializeContent(kind));
+  ct.counts[ct.name] = ct.entries.length;
+  renderContentList(kind);
+  renderEntries(kind);
+}
+
+async function loadContentItem(kind, name) {
   if (!confirmDiscard(kind, `Load "${name}"`)) return;
   setContentBusy(kind, true);
   try {
-    const result = await GET(`/api/content/${kind}/${encodeURIComponent(name)}`);
-    const data = Array.isArray(result.data) ? result.data : isPlainObject(result.data) ? [result.data] : [];
-    ct.name = result.name;
-    ct.path = result.path;
-    ct.entries = data.map((raw) => CONTENT_MODEL[kind].fromFile(raw));
-    ct.savedText = JSON.stringify(serializeContent(kind));
-    ct.counts[ct.name] = ct.entries.length;
-    renderContentList(kind);
-    renderEntries(kind);
+    showContentItem(kind, await GET(`/api/content/${kind}/${encodeURIComponent(name)}`));
   } catch (error) {
     showError(error.message);
   } finally {
@@ -1910,6 +1931,7 @@ async function saveContent(kind, name) {
     ct.savedText = JSON.stringify(data);
     ct.counts[ct.name] = data.length;
     toast(`Saved ${result.path}.`);
+    scheduleEvaluate();
     await loadContentList(kind);
     return true;
   } catch (error) {
@@ -1947,6 +1969,7 @@ async function deleteContentItem(kind, name) {
       ct.savedText = "[]";
     }
     toast(`Deleted ${name}.`);
+    scheduleEvaluate();
     await loadContentList(kind);
   } catch (error) {
     showError(error.message);
@@ -2147,7 +2170,13 @@ async function applyDesign() {
     const taken = writes.filter((write, index) => lists[index].items.some((item) => item.name === name)).map(([kind]) => kind);
     if (taken.length && !window.confirm(`"${name}" exists in ${taken.join(", ")}. Replace it?`)) return;
     const paths = {};
-    for (const [kind, data] of writes) paths[kind] = (await api("PUT", `/api/content/${kind}/${encodeURIComponent(name)}`, { data })).path;
+    for (const [kind, data] of writes) {
+      const result = await api("PUT", `/api/content/${kind}/${encodeURIComponent(name)}`, { data });
+      paths[kind] = result.path;
+      if (!(kind in CONTENT_KINDS)) continue;
+      if (state.content[kind].name === name) showContentItem(kind, { ...result, data });
+      loadContentList(kind);
+    }
     const values = { "agent.scenario_specific_instructions": paths.instructions };
     for (const kind of Object.keys(CONTENT_KINDS)) {
       if (paths[kind] && contentSettingKnown(kind)) values[CONTENT_KINDS[kind].setting] = paths[kind];
@@ -2370,6 +2399,7 @@ function formState() {
 }
 
 const persistState = debounce(async () => {
+  if (!state.loaded) return;
   try {
     await POST("/api/state", formState());
   } catch (error) {
@@ -2378,7 +2408,7 @@ const persistState = debounce(async () => {
 }, PERSIST_DELAY);
 
 function persistOnHide() {
-  if (!navigator.sendBeacon) return;
+  if (!state.loaded || !navigator.sendBeacon) return;
   navigator.sendBeacon("/api/state", new Blob([JSON.stringify(formState())], { type: "application/json" }));
 }
 
@@ -2463,10 +2493,10 @@ async function boot() {
   state.overrides = isPlainObject(last.overrides) ? last.overrides : {};
   state.resume = !!last.resume;
   $("#resumeSwitch").checked = state.resume;
-  await loadPresets();
+  const presetsOk = await loadPresets();
   const found = state.presets.some((p) => p.name === last.preset);
-  const wanted = found ? last.preset : null;
-  if (last.preset && !found) {
+  const wanted = presetsOk && !found ? null : last.preset || null;
+  if (presetsOk && last.preset && !found) {
     state.overrides = {};
     toast(`The saved preset "${last.preset}" was not found. Starting from the defaults.`);
   }

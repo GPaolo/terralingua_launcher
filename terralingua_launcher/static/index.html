@@ -48,9 +48,9 @@
               </div>
               <p id="presetInfo" class="hint"></p>
               <div class="toolbar-row">
-                <input id="searchBox" type="search" placeholder="Search settings" aria-label="Search settings by name, path, or description">
+                <input id="searchBox" type="search" placeholder="Search settings" aria-label="Search settings by name, path, or description" autocomplete="off">
                 <label class="switch-label">
-                  <span class="switch"><input type="checkbox" id="showInactive" role="switch"><span class="track" aria-hidden="true"></span></span>
+                  <span class="switch"><input type="checkbox" id="showInactive" role="switch" autocomplete="off"><span class="track" aria-hidden="true"></span></span>
                   <span id="showInactiveText">Show inactive settings (0)</span>
                 </label>
                 <label class="switch-label">
@@ -245,7 +245,7 @@
               <span id="logStatus" class="hint"></span>
               <span class="spacer"></span>
               <label class="switch-label">
-                <span class="switch"><input type="checkbox" id="followSwitch" role="switch" checked><span class="track" aria-hidden="true"></span></span>
+                <span class="switch"><input type="checkbox" id="followSwitch" role="switch" checked autocomplete="off"><span class="track" aria-hidden="true"></span></span>
                 <span>Scroll to new output</span>
               </label>
               <button id="clearLog" type="button">Clear</button>
@@ -266,6 +266,9 @@
       <label for="settingsPython">Python interpreter</label>
       <input id="settingsPython" type="text" list="pythonList" spellcheck="false" autocomplete="off">
       <datalist id="pythonList"></datalist>
+      <label for="settingsToolPorts">Ports for scenario tools</label>
+      <input id="settingsToolPorts" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" aria-describedby="settingsToolPortsHint">
+      <p id="settingsToolPortsHint" class="hint">Leave empty for any free port. When you reach the launcher through forwarded ports, list the ports you forwarded, for example 8990.</p>
       <p id="settingsError" class="dialog-error" role="alert" hidden></p>
       <div class="actions">
         <button type="button" id="settingsCancel">Cancel</button>
