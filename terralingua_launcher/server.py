@@ -322,10 +322,9 @@ def main():
     parser.add_argument("--python", default=None, help="Interpreter with terralingua installed, used to run the simulations")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7000)
-    parser.add_argument("--state-file", type=Path, default=None, help="Where the launcher keeps its settings and last form (default ~/.terralingua_launcher.json)")
     args = parser.parse_args()
 
-    app = create_app(args.workdir, args.python, args.state_file)
+    app = create_app(args.workdir, args.python)
     print(f"TerraLingua launcher: http://{args.host}:{args.port}")
     print(f"working directory {app.state.workdir}, interpreter {app.state.python}")
     if target.version(app.state.python, app.state.workdir, env=app.state.env) is None:

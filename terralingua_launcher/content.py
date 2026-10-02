@@ -2,7 +2,7 @@
 
 They live under <workdir>/launcher_content/<kind>/. A run points at them
 through a setting (`env.init_artifacts_path`, `agent.personas_path`,
-`agent.additional_instructions_path`) with a path relative to the working
+`agent.scenario_specific_instructions`) with a path relative to the working
 directory.
 """
 
