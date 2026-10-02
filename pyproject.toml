@@ -17,11 +17,8 @@ dependencies = [
 [project.scripts]
 terralingua-launcher = "terralingua_launcher.server:main"
 
-# The package directory is the project root: pip-installable from here, and
-# runnable as python -m terralingua_launcher from the parent folder.
 [tool.setuptools]
 packages = ["terralingua_launcher"]
-package-dir = { "terralingua_launcher" = "." }
 
 [tool.setuptools.package-data]
 terralingua_launcher = ["static/*"]
@@ -31,6 +28,7 @@ test = ["pytest", "httpx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 110

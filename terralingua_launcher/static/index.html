@@ -29,11 +29,13 @@
 
     <nav class="tabs" role="tablist" aria-label="Pages">
       <button class="tab" role="tab" type="button" id="tabLaunch" data-tab="launch" aria-controls="paneLaunch" aria-selected="true">Launch</button>
+      <button class="tab" role="tab" type="button" id="tabArtifacts" data-tab="artifacts" aria-controls="paneArtifacts" aria-selected="false">Artifacts</button>
+      <button class="tab" role="tab" type="button" id="tabPersonas" data-tab="personas" aria-controls="panePersonas" aria-selected="false">Personas</button>
       <button class="tab" role="tab" type="button" id="tabConsole" data-tab="console" aria-controls="paneConsole" aria-selected="false">Console <span id="consoleBadge" class="badge"></span></button>
     </nav>
 
     <main id="main">
-      <section id="paneLaunch" class="pane" role="tabpanel" aria-labelledby="tabLaunch">
+      <section id="paneLaunch" class="pane" role="tabpanel" aria-labelledby="tabLaunch" data-tab="launch">
         <div class="launch-grid">
           <div class="form-column">
             <div class="toolbar panel">
@@ -87,7 +89,73 @@
         </div>
       </section>
 
-      <section id="paneConsole" class="pane" role="tabpanel" aria-labelledby="tabConsole" hidden>
+      <section id="paneArtifacts" class="pane" role="tabpanel" aria-labelledby="tabArtifacts" data-tab="artifacts" hidden>
+        <div class="content-grid">
+          <aside class="panel content-side">
+            <h2>Saved artifact sets</h2>
+            <ul class="ct-items" aria-label="Saved artifact sets"></ul>
+            <div class="ct-side-actions">
+              <button type="button" class="ct-new">New</button>
+              <div class="ct-save-as">
+                <label for="artifactsSaveAsName">Save as</label>
+                <input id="artifactsSaveAsName" class="ct-save-as-name" type="text" spellcheck="false" autocomplete="off" placeholder="name">
+                <button type="button" class="ct-save-as-btn" disabled>Save as</button>
+              </div>
+              <p class="ct-name-error" role="alert" hidden></p>
+              <p class="hint">The run reads every JSON file in the set's folder. The setting <code>env.init_artifacts_path</code> takes the folder path.</p>
+            </div>
+          </aside>
+          <div class="panel content-editor" aria-busy="false">
+            <div class="ct-head">
+              <h2 class="ct-title"><span class="ct-title-name">New artifact set</span> <span class="ct-unsaved" hidden>(unsaved)</span></h2>
+              <div class="ct-actions">
+                <button type="button" class="ct-save primary" disabled>Save</button>
+                <button type="button" class="ct-add">Add entry</button>
+                <button type="button" class="ct-use" disabled>Use in launch</button>
+              </div>
+            </div>
+            <p class="ct-note" hidden></p>
+            <p class="ct-info hint"></p>
+            <p class="ct-hint hint" aria-live="polite"></p>
+            <div class="ct-entries"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="panePersonas" class="pane" role="tabpanel" aria-labelledby="tabPersonas" data-tab="personas" hidden>
+        <div class="content-grid">
+          <aside class="panel content-side">
+            <h2>Saved persona lists</h2>
+            <ul class="ct-items" aria-label="Saved persona lists"></ul>
+            <div class="ct-side-actions">
+              <button type="button" class="ct-new">New</button>
+              <div class="ct-save-as">
+                <label for="personasSaveAsName">Save as</label>
+                <input id="personasSaveAsName" class="ct-save-as-name" type="text" spellcheck="false" autocomplete="off" placeholder="name">
+                <button type="button" class="ct-save-as-btn" disabled>Save as</button>
+              </div>
+              <p class="ct-name-error" role="alert" hidden></p>
+              <p class="hint">The first beings, in creation order, get these personas. The setting <code>agent.personas_path</code> takes the file path.</p>
+            </div>
+          </aside>
+          <div class="panel content-editor" aria-busy="false">
+            <div class="ct-head">
+              <h2 class="ct-title"><span class="ct-title-name">New persona list</span> <span class="ct-unsaved" hidden>(unsaved)</span></h2>
+              <div class="ct-actions">
+                <button type="button" class="ct-save primary" disabled>Save</button>
+                <button type="button" class="ct-add">Add entry</button>
+                <button type="button" class="ct-use" disabled>Use in launch</button>
+              </div>
+            </div>
+            <p class="ct-note" hidden></p>
+            <p class="ct-info hint"></p>
+            <p class="ct-hint hint" aria-live="polite"></p>
+            <div class="ct-entries"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="paneConsole" class="pane" role="tabpanel" aria-labelledby="tabConsole" data-tab="console" hidden>
         <div class="console-grid">
           <div class="proc-column panel">
             <h2>Processes</h2>

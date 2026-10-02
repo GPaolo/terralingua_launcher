@@ -10,6 +10,7 @@ processes and shows their logs.
 import argparse
 import os
 import shutil
+import socket
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -20,7 +21,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from terralingua_launcher import command, store, target
+from terralingua_launcher import command, content, store, target
 from terralingua_launcher.procs import ProcRegistry
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -41,9 +42,16 @@ def resolve_python(python: str) -> str | None:
     return os.path.abspath(found) if found else None
 
 
-def create_app(workdir: Path | None = None, python: str | None = None) -> FastAPI:
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def create_app(workdir: Path | None = None, python: str | None = None, state_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="TerraLingua Launcher")
-    state = store.load_state()
+    app.state.file = store.StateFile(state_path)
+    state = app.state.file.load()
     app.state.workdir = Path(workdir or state.get("workdir") or Path.cwd()).expanduser().resolve()
     requested = str(python or state.get("python") or store.default_python(app.state.workdir))
     app.state.python = resolve_python(requested) or requested
@@ -60,7 +68,7 @@ def create_app(workdir: Path | None = None, python: str | None = None) -> FastAP
         return await call_next(request)
 
     def persist():
-        store.save_state({
+        app.state.file.save({
             "workdir": str(app.state.workdir),
             "python": app.state.python,
             "last": app.state.last,
@@ -207,6 +215,41 @@ def create_app(workdir: Path | None = None, python: str | None = None) -> FastAP
         app.state.schema_cache = {}
         return {"ok": True, "path": str(path)}
 
+    # ---------- content files: artifact sets, persona lists, instruction texts ----------
+
+    def content_call(call, *args):
+        try:
+            return call(app.state.workdir, *args)
+        except content.ContentError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(400, f"could not read the file: {exc}") from exc
+
+    @app.get("/api/content/{kind}")
+    def list_content(kind: str):
+        return {"items": content_call(content.list_items, kind)}
+
+    @app.get("/api/content/{kind}/{name}")
+    def read_content(kind: str, name: str):
+        return content_call(content.read_item, kind, name)
+
+    @app.put("/api/content/{kind}/{name}")
+    def write_content(kind: str, name: str, body: dict):
+        if "data" not in body:
+            raise HTTPException(400, "the body needs a 'data' field")
+        return content_call(content.write_item, kind, name, body["data"])
+
+    @app.delete("/api/content/{kind}/{name}")
+    def delete_content(kind: str, name: str):
+        content_call(content.delete_item, kind, name)
+        return {"ok": True}
+
+    @app.get("/api/artifact_types")
+    def get_artifact_types(preset: str | None = None):
+        return {"types": ask(target.artifact_types, preset or None)}
+
     # ---------- launch & processes ----------
 
     @app.post("/api/launch")
@@ -226,6 +269,26 @@ def create_app(workdir: Path | None = None, python: str | None = None) -> FastAP
         app.state.last = {"preset": preset, "overrides": overrides, "resume": bool(body.get("resume"))}
         persist()
         return {"proc": proc.as_dict()}
+
+    @app.post("/api/tools/{name}")
+    def start_tool(name: str, body: dict):
+        """Start a tool the preset's scenario ships (viewer, anthropologist) on a free port."""
+        if not python_ok():
+            raise HTTPException(400, f"{app.state.python} is not an executable interpreter")
+        preset = body.get("preset") or None
+        tools = (schema(preset).get("scenario") or {}).get("tools") or {}
+        module = tools.get(name)
+        if not module:
+            raise HTTPException(400, f"the preset has no {name}")
+        logs = app.state.env.get("TL_LOGS_DIR") or str(app.state.workdir / "logs")
+        port = free_port()
+        url = f"http://127.0.0.1:{port}"
+        argv = [app.state.python, "-m", module, "--logs", logs, "--port", str(port)]
+        try:
+            proc = app.state.procs.spawn(f"{name} for {preset}", argv, app.state.workdir, app.state.env, url)
+        except OSError as exc:
+            raise HTTPException(400, f"could not start {app.state.python}: {exc}") from exc
+        return {"proc": proc.as_dict(), "url": url}
 
     @app.get("/api/procs")
     def procs():
@@ -259,9 +322,10 @@ def main():
     parser.add_argument("--python", default=None, help="Interpreter with terralingua installed, used to run the simulations")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7000)
+    parser.add_argument("--state-file", type=Path, default=None, help="Where the launcher keeps its settings and last form (default ~/.terralingua_launcher.json)")
     args = parser.parse_args()
 
-    app = create_app(args.workdir, args.python)
+    app = create_app(args.workdir, args.python, args.state_file)
     print(f"TerraLingua launcher: http://{args.host}:{args.port}")
     print(f"working directory {app.state.workdir}, interpreter {app.state.python}")
     if target.version(app.state.python, app.state.workdir, env=app.state.env) is None:

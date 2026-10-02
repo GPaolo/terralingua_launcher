@@ -20,6 +20,33 @@ const DERIVED_LABELS = {
   hop_radius: "Hop radius",
 };
 
+/* Content files a run reads, saved under <workdir>/launcher_content/<kind>/.
+   `pattern` recognises a setting value that points at one of them. */
+const CONTENT_KINDS = {
+  artifacts: {
+    setting: "env.init_artifacts_path",
+    tab: "Artifacts",
+    one: "artifact set",
+    many: "artifact sets",
+    entry: "Artifact",
+    pattern: /^(?:\.\/)?launcher_content\/artifacts\/([^/]+)\/?$/,
+  },
+  personas: {
+    setting: "agent.personas_path",
+    tab: "Personas",
+    one: "persona list",
+    many: "persona lists",
+    entry: "Persona",
+    pattern: /^(?:\.\/)?launcher_content\/personas\/([^/]+)\.json$/,
+  },
+};
+
+let entrySeq = 0;
+
+function newContentState() {
+  return { items: [], counts: {}, name: null, path: null, entries: [], savedText: "[]", busy: false, nodes: null };
+}
+
 const state = {
   settings: null,
   presets: [],
@@ -55,6 +82,8 @@ const state = {
   follow: true,
   tab: "launch",
   toastTimer: null,
+  content: { artifacts: newContentState(), personas: newContentState() },
+  artifactTypes: { key: null, list: null, loading: false, cache: {}, seq: 0 },
 };
 
 /* ---------------- small helpers ---------------- */
@@ -249,6 +278,7 @@ async function saveSettings(event) {
     $("#settingsDialog").close();
     renderHeader();
     state.schemaCache = {};
+    resetArtifactTypes();
     await loadPresets();
     const preset = state.presets.some((p) => p.name === state.preset) ? state.preset : null;
     await selectPreset(preset, true);
@@ -378,6 +408,8 @@ async function selectPreset(name, refresh = false) {
     state.evaluation = null;
     state.pinned = null;
     buildForm();
+    if (state.tab === "artifacts") refreshArtifactTypes();
+    refreshContentPanes();
     if (Object.keys(state.overrides).length) runEvaluation();
     else applyEvaluationResult(baseResult, seq);
     return true;
@@ -877,12 +909,21 @@ function buildRow(path, section) {
   const detailsNode = buildDetails(field);
   detailsNode.id = `${id}-details`;
   detailsNode.hidden = true;
+  const contentKind = Object.keys(CONTENT_KINDS).find((kind) => CONTENT_KINDS[kind].setting === path) || null;
+  const contentLink = contentKind
+    ? el("p", { class: "row-link", hidden: true }, el("button", {
+      type: "button", class: "link-chip", onclick: () => openContentItem(contentKind, state.rows[path].contentName),
+    }, `Edit in ${CONTENT_KINDS[contentKind].tab}`))
+    : null;
   const row = el("div", { class: "row", "data-path": path },
     label,
     el("div", { class: "row-control" }, control.el),
     el("div", { class: "row-actions" }, reset, detailsButton),
-    reasonNode, errorNode, detailsNode);
-  state.rows[path] = { path, section, el: row, control, reset, detailsButton, changedMark, reasonNode, errorNode, errorText, detailsNode };
+    contentLink, reasonNode, errorNode, detailsNode);
+  state.rows[path] = {
+    path, section, el: row, control, reset, detailsButton, changedMark, reasonNode, errorNode, errorText, detailsNode,
+    contentKind, contentLink, contentName: null,
+  };
   if (!field.children.length) return row;
   const children = el("div", { class: "children" });
   for (const child of field.children) children.append(buildRow(child, section));
@@ -952,6 +993,10 @@ function refreshRows() {
     const editing = document.activeElement === row.control.input || !!jsonError;
     if (!editing) row.control.setValue(displayValue(path));
     row.control.setDisabled(!fstate.active);
+    if (row.contentLink) {
+      row.contentName = contentNameFromPath(row.contentKind, displayValue(path));
+      row.contentLink.hidden = !row.contentName;
+    }
     const describedBy = [fstate.active ? "" : row.reasonNode.id, errorText ? row.errorNode.id : ""].filter(Boolean);
     setAttr(row.control.input, "aria-describedby", describedBy.join(" ") || null);
     setAttr(row.control.input, "aria-invalid", errorText ? "true" : null);
@@ -1005,11 +1050,16 @@ async function runEvaluation() {
 
 const scheduleEvaluate = debounce(runEvaluation, EVALUATE_DELAY);
 
+function worthShowing(diagnostic) {
+  // An inactive setting is already hidden or greyed out in the form.
+  return diagnostic.code !== "inactive_setting";
+}
+
 function applyEvaluationResult(result, seq) {
   if (seq !== state.evalSeq) return;
   state.evalPending = false;
   state.evalValid = !!(result && result.valid);
-  state.diagnostics = result ? result.diagnostics || [] : [];
+  state.diagnostics = result ? (result.diagnostics || []).filter(worthShowing) : [];
   if (state.evalValid) {
     state.evaluation = {
       states: result.fields || {},
@@ -1023,6 +1073,7 @@ function applyEvaluationResult(result, seq) {
   refreshRows();
   updateActionButtons();
   refreshPreview();
+  refreshContentPanes();
 }
 
 function renderDiagnostics(answered) {
@@ -1142,6 +1193,7 @@ async function savePreset(event) {
     state.overrides = {};
     state.jsonErrors = {};
     state.schemaCache = {};
+    resetArtifactTypes();
     await loadPresets();
     const ok = await selectPreset(name);
     if (!ok) {
@@ -1156,6 +1208,725 @@ async function savePreset(event) {
   } finally {
     confirmButton.disabled = false;
   }
+}
+
+/* ---------------- content files: artifact sets and persona lists ---------------- */
+
+function contentNodes(kind) {
+  const ct = state.content[kind];
+  if (ct.nodes) return ct.nodes;
+  const pane = $(`#pane${CONTENT_KINDS[kind].tab}`);
+  ct.nodes = {
+    pane,
+    editor: $(".content-editor", pane),
+    items: $(".ct-items", pane),
+    newButton: $(".ct-new", pane),
+    saveAsName: $(".ct-save-as-name", pane),
+    saveAsButton: $(".ct-save-as-btn", pane),
+    nameError: $(".ct-name-error", pane),
+    titleName: $(".ct-title-name", pane),
+    unsaved: $(".ct-unsaved", pane),
+    saveButton: $(".ct-save", pane),
+    addButton: $(".ct-add", pane),
+    useButton: $(".ct-use", pane),
+    note: $(".ct-note", pane),
+    info: $(".ct-info", pane),
+    hint: $(".ct-hint", pane),
+    entries: $(".ct-entries", pane),
+  };
+  return ct.nodes;
+}
+
+function contentNameFromPath(kind, value) {
+  if (typeof value !== "string") return null;
+  const match = CONTENT_KINDS[kind].pattern.exec(value.trim());
+  return match ? match[1] : null;
+}
+
+function contentNameError(name) {
+  if (name.startsWith("-") || name.startsWith(".")) return "The name must not start with '-' or '.'.";
+  if (/[\\/]/.test(name)) return "The name must not contain slashes.";
+  return "";
+}
+
+function contentSettingKnown(kind) {
+  return CONTENT_KINDS[kind].setting in state.fields;
+}
+
+function toInt(text) {
+  const trimmed = String(text).trim();
+  return /^-?\d+$/.test(trimmed) ? Number(trimmed) : null;
+}
+
+function parseLoose(text) {
+  try {
+    return JSON.parse(text.trim());
+  } catch (error) {
+    return text;
+  }
+}
+
+function sortedObject(object) {
+  return Object.fromEntries(Object.keys(object).sort().map((key) => [key, object[key]]));
+}
+
+function paramText(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function currentWorldType() {
+  const value = displayValue("env.world_type");
+  return typeof value === "string" ? value : "grid";
+}
+
+/* ---- artifact types ---- */
+
+function artifactTypeList() {
+  return state.artifactTypes.list || [];
+}
+
+function artifactTypeOf(name) {
+  return artifactTypeList().find((type) => type.name === name) || null;
+}
+
+function defaultArtifactType() {
+  const types = artifactTypeList();
+  return (types.find((type) => type.creatable) || types[0] || { name: "text" }).name;
+}
+
+function artifactTypeHint(name) {
+  if (state.artifactTypes.loading) return "Loading artifact types…";
+  const type = artifactTypeOf(name);
+  if (!type) return state.artifactTypes.list ? "This type is not in the current preset. The run skips the entry." : "The artifact types are not loaded.";
+  return type.creatable ? type.description : `${type.description} Beings cannot create this type.`;
+}
+
+function resetArtifactTypes() {
+  Object.assign(state.artifactTypes, { key: null, list: null, loading: false, cache: {} });
+}
+
+/* Loads the types for the current preset once, then re-renders the entries
+   so the type selects and parameter inputs match. */
+async function refreshArtifactTypes() {
+  const types = state.artifactTypes;
+  const key = state.preset || "";
+  const seq = ++types.seq;
+  if (!types.cache[key]) {
+    types.loading = true;
+    refreshContentPane("artifacts");
+    try {
+      const query = key ? `?preset=${encodeURIComponent(key)}` : "";
+      types.cache[key] = (await GET(`/api/artifact_types${query}`)).types;
+    } catch (error) {
+      if (seq === types.seq) showError(`The artifact types could not be loaded: ${error.message}`);
+    }
+    if (seq !== types.seq) return;
+  }
+  types.loading = false;
+  const list = types.cache[key];
+  if (!list || (types.key === key && types.list === list)) {
+    refreshContentPane("artifacts");
+    return;
+  }
+  types.key = key;
+  types.list = list;
+  for (const entry of state.content.artifacts.entries) splitArtifactParams(entry);
+  renderEntries("artifacts");
+}
+
+/* ---- entry models: the editor's view of one file entry ---- */
+
+function newArtifactEntry() {
+  return {
+    id: ++entrySeq, name: "", artType: defaultArtifactType(), payload: "",
+    poseMode: currentWorldType() === "grid" ? "cell" : "node", row: "", col: "", node: "",
+    lifespan: "-1", movable: true, params: {}, extra: {}, extraText: "", extraError: "", rest: {},
+  };
+}
+
+/* Puts each parameter either in `params` (the type declares it) or in `extra` (free JSON). */
+function splitArtifactParams(entry) {
+  const known = artifactTypeOf(entry.artType)?.params || [];
+  const all = { ...entry.extra, ...entry.params };
+  entry.params = {};
+  entry.extra = {};
+  for (const [key, value] of Object.entries(all)) {
+    if (known.includes(key)) entry.params[key] = value;
+    else entry.extra[key] = value;
+  }
+  entry.extraText = Object.keys(entry.extra).length ? formatJson(entry.extra) : "";
+  entry.extraError = "";
+}
+
+function artifactFromFile(raw) {
+  const { name, art_type: artType, payload, pose, lifespan, movable, params, ...rest } = isPlainObject(raw) ? raw : {};
+  const entry = newArtifactEntry();
+  if (name !== undefined && name !== null) entry.name = String(name);
+  if (typeof artType === "string" && artType) entry.artType = artType;
+  if (payload !== undefined && payload !== null) entry.payload = typeof payload === "string" ? payload : formatJson(payload);
+  if (Array.isArray(pose)) {
+    entry.poseMode = "cell";
+    entry.row = pose[0] === undefined || pose[0] === null ? "" : String(pose[0]);
+    entry.col = pose[1] === undefined || pose[1] === null ? "" : String(pose[1]);
+  } else if (pose !== undefined && pose !== null) {
+    entry.poseMode = "node";
+    entry.node = String(pose);
+  }
+  if (lifespan !== undefined && lifespan !== null) entry.lifespan = String(lifespan);
+  entry.movable = movable !== false;
+  entry.extra = isPlainObject(params) ? { ...params } : {};
+  entry.rest = rest;
+  splitArtifactParams(entry);
+  return entry;
+}
+
+function artifactToFile(entry) {
+  const out = {
+    name: entry.name.trim(),
+    art_type: entry.artType,
+    payload: entry.artType === "text" ? entry.payload : parseLoose(entry.payload),
+    pose: entry.poseMode === "cell" ? [toInt(entry.row), toInt(entry.col)] : entry.node.trim(),
+    lifespan: toInt(entry.lifespan),
+    movable: !!entry.movable,
+  };
+  const params = sortedObject({ ...entry.extra, ...entry.params });
+  if (Object.keys(params).length) out.params = params;
+  for (const [key, value] of Object.entries(entry.rest)) {
+    if (!(key in out)) out[key] = value;
+  }
+  return out;
+}
+
+function newPersonaEntry() {
+  return { id: ++entrySeq, persona: "", name: "", count: "1", rest: {} };
+}
+
+function personaFromFile(raw) {
+  const { persona, name, count, ...rest } = isPlainObject(raw) ? raw : {};
+  const entry = newPersonaEntry();
+  if (persona !== undefined && persona !== null) entry.persona = String(persona);
+  if (name !== undefined && name !== null) entry.name = String(name);
+  if (count !== undefined && count !== null) entry.count = String(count);
+  entry.rest = rest;
+  return entry;
+}
+
+function personaToFile(entry) {
+  const out = { persona: entry.persona.trim() };
+  if (entry.name.trim()) out.name = entry.name.trim();
+  out.count = toInt(entry.count);
+  for (const [key, value] of Object.entries(entry.rest)) {
+    if (!(key in out)) out[key] = value;
+  }
+  return out;
+}
+
+function validateArtifact(entry, problems) {
+  if (!entry.name.trim()) problems.name = "Type a name.";
+  if (!entry.payload.trim()) problems.payload = "Type a payload.";
+  if (entry.poseMode === "cell") {
+    if (toInt(entry.row) === null || toInt(entry.col) === null) problems.pose = "A cell needs two whole numbers: row and column.";
+  } else if (!entry.node.trim()) {
+    problems.pose = "Type a node id.";
+  }
+  const lifespan = toInt(entry.lifespan);
+  if (lifespan === null || lifespan < -1) problems.lifespan = "Lifespan is a whole number. -1 means forever.";
+  if (entry.extraError) problems.params = entry.extraError;
+}
+
+function validatePersona(entry, problems) {
+  if (!entry.persona.trim()) problems.persona = "Type the persona text.";
+  const count = toInt(entry.count);
+  if (count === null || count < 1) problems.count = "Count is a whole number of 1 or more.";
+}
+
+const CONTENT_MODEL = {
+  artifacts: { blank: newArtifactEntry, fromFile: artifactFromFile, toFile: artifactToFile, validate: validateArtifact, render: renderArtifactEntry },
+  personas: { blank: newPersonaEntry, fromFile: personaFromFile, toFile: personaToFile, validate: validatePersona, render: renderPersonaEntry },
+};
+
+/* Problems per entry id: { field: message }. An entry without problems has an empty object. */
+function validateContent(kind) {
+  const ct = state.content[kind];
+  const problems = new Map(ct.entries.map((entry) => [entry.id, {}]));
+  for (const entry of ct.entries) CONTENT_MODEL[kind].validate(entry, problems.get(entry.id));
+  if (kind === "artifacts") {
+    const byName = new Map();
+    for (const entry of ct.entries) {
+      const name = entry.name.trim();
+      if (!name) continue;
+      if (byName.has(name)) {
+        const message = `Two entries are named "${name}". Names must be unique.`;
+        problems.get(entry.id).name = message;
+        problems.get(byName.get(name).id).name = message;
+      } else {
+        byName.set(name, entry);
+      }
+    }
+  }
+  return problems;
+}
+
+function serializeContent(kind) {
+  return state.content[kind].entries.map((entry) => CONTENT_MODEL[kind].toFile(entry));
+}
+
+function contentDirty(kind) {
+  return JSON.stringify(serializeContent(kind)) !== state.content[kind].savedText;
+}
+
+/* ---- entry cards ---- */
+
+function entryErrorNode(entry, field, id) {
+  const node = el("p", { class: "entry-error", id: `${id}-error`, hidden: true });
+  entry.errorNodes[field] = node;
+  return node;
+}
+
+function fieldBlock(id, labelText, control, errorNode, wide) {
+  return el("div", { class: wide ? "field wide" : "field" }, el("label", { for: id }, labelText), control, errorNode);
+}
+
+function entryCard(kind, entry, index, fields) {
+  const label = `${CONTENT_KINDS[kind].entry} ${index + 1}`;
+  const head = el("div", { class: "entry-head" },
+    el("button", { type: "button", class: "mini", "aria-label": `Duplicate ${label}`, onclick: () => duplicateEntry(kind, entry) }, "Duplicate"),
+    el("button", { type: "button", class: "danger-ghost mini", "aria-label": `Remove ${label}`, onclick: () => removeEntry(kind, entry) }, "Remove"));
+  const card = el("fieldset", { class: "entry" }, el("legend", {}, label), head, el("div", { class: "entry-fields" }, ...fields));
+  entry.card = card;
+  return card;
+}
+
+function renderArtifactEntry(entry, index) {
+  const kind = "artifacts";
+  const id = (part) => `artifacts-e${entry.id}-${part}`;
+  entry.inputs = {};
+  entry.errorNodes = {};
+  const edited = () => refreshContentPane(kind);
+
+  const nameInput = el("input", { type: "text", id: id("name"), spellcheck: "false", autocomplete: "off", placeholder: "snake_case_name" });
+  nameInput.value = entry.name;
+  nameInput.addEventListener("input", () => { entry.name = nameInput.value; edited(); });
+  entry.inputs.name = nameInput;
+
+  const typeSelect = el("select", { id: id("type") });
+  const typeHint = el("p", { class: "hint" });
+  const types = artifactTypeList();
+  for (const type of types) typeSelect.append(el("option", { value: type.name }, type.name));
+  if (!types.some((type) => type.name === entry.artType)) {
+    typeSelect.append(el("option", { value: entry.artType }, types.length ? `${entry.artType} (not in this preset)` : entry.artType));
+  }
+  typeSelect.value = entry.artType;
+  typeHint.textContent = artifactTypeHint(entry.artType);
+
+  const payloadArea = el("textarea", { id: id("payload"), rows: "3", spellcheck: "false" });
+  payloadArea.value = entry.payload;
+  payloadArea.addEventListener("input", () => { entry.payload = payloadArea.value; edited(); });
+  entry.inputs.payload = payloadArea;
+
+  const poseInputs = el("span", { class: "pose-inputs" });
+  const renderPose = () => {
+    poseInputs.textContent = "";
+    if (entry.poseMode === "cell") {
+      const row = el("input", { type: "number", step: "1", inputmode: "numeric", id: id("row"), placeholder: "row", "aria-label": "Row" });
+      const col = el("input", { type: "number", step: "1", inputmode: "numeric", id: id("col"), placeholder: "col", "aria-label": "Column" });
+      row.value = entry.row;
+      col.value = entry.col;
+      row.addEventListener("input", () => { entry.row = row.value; edited(); });
+      col.addEventListener("input", () => { entry.col = col.value; edited(); });
+      poseInputs.append(row, col);
+      entry.inputs.pose = [row, col];
+    } else {
+      const node = el("input", { type: "text", id: id("node"), spellcheck: "false", autocomplete: "off", placeholder: "node id", "aria-label": "Node id" });
+      node.value = entry.node;
+      node.addEventListener("input", () => { entry.node = node.value; edited(); });
+      poseInputs.append(node);
+      entry.inputs.pose = [node];
+    }
+  };
+  const modeGroup = el("span", { class: "pose-mode", role: "radiogroup", "aria-label": "Pose kind" });
+  for (const [value, text] of [["cell", "cell [row, col]"], ["node", "node id"]]) {
+    const radio = el("input", { type: "radio", name: id("pose-mode"), value, id: id(`pose-${value}`) });
+    radio.checked = entry.poseMode === value;
+    radio.addEventListener("change", () => {
+      if (!radio.checked) return;
+      entry.poseMode = value;
+      renderPose();
+      edited();
+    });
+    modeGroup.append(el("label", { for: id(`pose-${value}`) }, radio, text));
+  }
+  renderPose();
+  const poseBlock = el("div", { class: "field wide", role: "group", "aria-labelledby": id("pose-label") },
+    el("span", { class: "field-label", id: id("pose-label") }, "Pose"),
+    el("div", { class: "pose-row" }, modeGroup, poseInputs),
+    entryErrorNode(entry, "pose", id("pose")));
+
+  const lifespanInput = el("input", { type: "number", step: "1", min: "-1", inputmode: "numeric", id: id("lifespan") });
+  lifespanInput.value = entry.lifespan;
+  lifespanInput.addEventListener("input", () => { entry.lifespan = lifespanInput.value; edited(); });
+  entry.inputs.lifespan = lifespanInput;
+
+  const movable = makeSwitch(id("movable"), (on) => { entry.movable = on; edited(); }, false);
+  movable.setValue(entry.movable);
+  movable.input.setAttribute("aria-label", "Movable");
+  const movableBlock = el("div", { class: "field" },
+    el("span", { class: "field-label" }, "Movable"),
+    el("label", { class: "switch-label", for: id("movable") }, movable.el, el("span", { class: "hint" }, "beings can carry it")));
+
+  const paramsBlock = el("div", { class: "params" });
+  const renderParams = () => {
+    paramsBlock.textContent = "";
+    const known = artifactTypeOf(entry.artType)?.params || [];
+    for (const name of known) {
+      const input = el("input", { type: "text", id: id(`param-${name}`), spellcheck: "false", autocomplete: "off" });
+      input.value = name in entry.params ? paramText(entry.params[name]) : "";
+      input.addEventListener("input", () => {
+        const text = input.value.trim();
+        if (text) entry.params[name] = parseLoose(text);
+        else delete entry.params[name];
+        edited();
+      });
+      paramsBlock.append(fieldBlock(id(`param-${name}`), name, input, null));
+    }
+    const extra = el("textarea", { id: id("extra"), rows: "2", spellcheck: "false", class: "json", placeholder: "{}" });
+    extra.value = entry.extraText;
+    extra.addEventListener("input", () => {
+      entry.extraText = extra.value;
+      entry.extraError = "";
+      const text = extra.value.trim();
+      if (!text) {
+        entry.extra = {};
+      } else {
+        try {
+          const value = JSON.parse(text);
+          const clash = isPlainObject(value) ? Object.keys(value).find((key) => known.includes(key)) : null;
+          if (!isPlainObject(value)) entry.extraError = "Other parameters must be a JSON object.";
+          else if (clash) entry.extraError = `"${clash}" has its own field above.`;
+          else entry.extra = value;
+        } catch (error) {
+          entry.extraError = `Invalid JSON. ${error.message}`;
+        }
+      }
+      edited();
+    });
+    entry.inputs.params = extra;
+    const label = known.length ? "Other parameters (JSON object)" : "Parameters (JSON object)";
+    paramsBlock.append(fieldBlock(id("extra"), label, extra, entryErrorNode(entry, "params", id("extra")), true));
+  };
+  renderParams();
+  typeSelect.addEventListener("change", () => {
+    entry.artType = typeSelect.value;
+    splitArtifactParams(entry);
+    typeHint.textContent = artifactTypeHint(entry.artType);
+    renderParams();
+    edited();
+  });
+
+  const fields = [
+    fieldBlock(id("name"), "Name", nameInput, entryErrorNode(entry, "name", id("name"))),
+    el("div", { class: "field" }, el("label", { for: id("type") }, "Type"), typeSelect, typeHint),
+    fieldBlock(id("payload"), "Payload", payloadArea, entryErrorNode(entry, "payload", id("payload")), true),
+    poseBlock,
+    el("div", { class: "field" }, el("label", { for: id("lifespan") }, "Lifespan"), lifespanInput,
+      el("p", { class: "hint" }, "-1 means forever."), entryErrorNode(entry, "lifespan", id("lifespan"))),
+    movableBlock,
+    paramsBlock,
+  ];
+  return entryCard(kind, entry, index, fields);
+}
+
+function renderPersonaEntry(entry, index) {
+  const kind = "personas";
+  const id = (part) => `personas-e${entry.id}-${part}`;
+  entry.inputs = {};
+  entry.errorNodes = {};
+  const edited = () => refreshContentPane(kind);
+
+  const personaArea = el("textarea", { id: id("persona"), rows: "3", placeholder: "You are a healer. You ..." });
+  personaArea.value = entry.persona;
+  personaArea.addEventListener("input", () => { entry.persona = personaArea.value; edited(); });
+  entry.inputs.persona = personaArea;
+
+  const nameInput = el("input", { type: "text", id: id("name"), autocomplete: "off", placeholder: "optional" });
+  nameInput.value = entry.name;
+  nameInput.addEventListener("input", () => { entry.name = nameInput.value; edited(); });
+
+  const countInput = el("input", { type: "number", step: "1", min: "1", inputmode: "numeric", id: id("count") });
+  countInput.value = entry.count;
+  countInput.addEventListener("input", () => { entry.count = countInput.value; edited(); });
+  entry.inputs.count = countInput;
+
+  const fields = [
+    el("div", { class: "field wide" }, el("label", { for: id("persona") }, "Persona (second person, 1 to 4 sentences)"),
+      personaArea, entryErrorNode(entry, "persona", id("persona"))),
+    fieldBlock(id("name"), "Name", nameInput, null),
+    el("div", { class: "field" }, el("label", { for: id("count") }, "Count"), countInput,
+      el("p", { class: "hint" }, "How many beings get this persona."), entryErrorNode(entry, "count", id("count"))),
+  ];
+  return entryCard(kind, entry, index, fields);
+}
+
+function renderEntries(kind) {
+  const ct = state.content[kind];
+  const nodes = contentNodes(kind);
+  nodes.entries.textContent = "";
+  if (!ct.entries.length) nodes.entries.append(el("p", { class: "empty" }, 'No entries yet. Use "Add entry".'));
+  ct.entries.forEach((entry, index) => nodes.entries.append(CONTENT_MODEL[kind].render(entry, index)));
+  refreshContentPane(kind);
+}
+
+function focusEntry(entry) {
+  const input = entry.card?.querySelector("input[type='text'], textarea");
+  if (input) input.focus();
+}
+
+function addEntry(kind) {
+  const entry = CONTENT_MODEL[kind].blank();
+  state.content[kind].entries.push(entry);
+  renderEntries(kind);
+  focusEntry(entry);
+}
+
+function duplicateEntry(kind, entry) {
+  const ct = state.content[kind];
+  const copy = { ...entry, id: ++entrySeq, card: null, inputs: null, errorNodes: null, rest: { ...entry.rest } };
+  if (kind === "artifacts") {
+    copy.params = { ...entry.params };
+    copy.extra = { ...entry.extra };
+    if (copy.name.trim()) copy.name = `${copy.name.trim()}_copy`;
+  }
+  ct.entries.splice(ct.entries.indexOf(entry) + 1, 0, copy);
+  renderEntries(kind);
+  focusEntry(copy);
+}
+
+function removeEntry(kind, entry) {
+  const ct = state.content[kind];
+  ct.entries.splice(ct.entries.indexOf(entry), 1);
+  renderEntries(kind);
+  contentNodes(kind).addButton.focus();
+}
+
+/* ---- the pane: list, title, buttons, hints ---- */
+
+function contentInfo(kind) {
+  const ct = state.content[kind];
+  const spec = CONTENT_KINDS[kind];
+  const parts = [];
+  if (ct.path && displayValue(spec.setting) === ct.path) parts.push(`The launch form uses this ${spec.one}.`);
+  if (kind === "artifacts") {
+    const types = state.artifactTypes;
+    if (types.loading) parts.push("Loading artifact types…");
+    else if (types.list) parts.push(`Artifact types ${state.preset ? `with preset ${state.preset}` : "without a preset"}: ${types.list.map((type) => type.name).join(", ")}.`);
+    const world = currentWorldType();
+    parts.push(`The launch form uses a ${world} world. New entries get a ${world === "grid" ? "cell pose [row, col]" : "node id pose"}.`);
+  } else {
+    const total = ct.entries.reduce((sum, entry) => sum + Math.max(0, toInt(entry.count) ?? 0), 0);
+    const beings = displayValue("env.init_agents");
+    parts.push(Number.isFinite(beings)
+      ? `${plural(total, "persona", "personas")} for ${plural(beings, "initial being", "initial beings")}.`
+      : `${plural(total, "persona", "personas")}.`);
+  }
+  return parts.join(" ");
+}
+
+function refreshContentPane(kind) {
+  const ct = state.content[kind];
+  const nodes = contentNodes(kind);
+  const spec = CONTENT_KINDS[kind];
+  const problems = validateContent(kind);
+  let problemCount = 0;
+  for (const entry of ct.entries) {
+    const found = problems.get(entry.id) || {};
+    problemCount += Object.keys(found).length;
+    for (const [field, node] of Object.entries(entry.errorNodes || {})) {
+      const message = found[field] || "";
+      node.hidden = !message;
+      node.textContent = message;
+      for (const input of [].concat(entry.inputs?.[field] || [])) {
+        setAttr(input, "aria-invalid", message ? "true" : null);
+        setAttr(input, "aria-describedby", message ? node.id : null);
+      }
+    }
+  }
+  const dirty = contentDirty(kind);
+  nodes.titleName.textContent = ct.name || `New ${spec.one}`;
+  nodes.unsaved.hidden = !dirty;
+  let reason = "";
+  if (ct.busy) reason = "Working…";
+  else if (problemCount) reason = `Fix ${plural(problemCount, "problem", "problems")} before you save.`;
+  else if (!ct.name && ct.entries.length) reason = `Type a name under "Save as" to save this new ${spec.one}.`;
+  else if (ct.name && !dirty) reason = "Nothing changed since the last save.";
+  nodes.hint.textContent = reason;
+  nodes.saveButton.disabled = ct.busy || !!problemCount || !ct.name || !dirty;
+  const saveAsName = nodes.saveAsName.value.trim();
+  const nameError = saveAsName ? contentNameError(saveAsName) : "";
+  nodes.nameError.hidden = !nameError;
+  nodes.nameError.textContent = nameError;
+  nodes.saveAsButton.disabled = ct.busy || !!problemCount || !saveAsName || !!nameError;
+  let note = "";
+  if (!state.schema) note = "Waiting for the settings to load.";
+  else if (!contentSettingKnown(kind)) note = `This TerraLingua version has no ${kind} setting.`;
+  nodes.note.hidden = !note;
+  nodes.note.textContent = note;
+  nodes.useButton.disabled = ct.busy || !!note || !ct.path;
+  nodes.useButton.title = ct.path ? `Set ${spec.setting} to ${ct.path}` : `Save the ${spec.one} first.`;
+  nodes.info.textContent = contentInfo(kind);
+  for (const li of nodes.items.children) setAttr(li, "aria-current", li.dataset.name && li.dataset.name === ct.name ? "true" : null);
+  nodes.editor.classList.toggle("busy", ct.busy);
+  nodes.editor.setAttribute("aria-busy", String(ct.busy));
+}
+
+function refreshContentPanes() {
+  for (const kind of Object.keys(CONTENT_KINDS)) refreshContentPane(kind);
+}
+
+function setContentBusy(kind, busy) {
+  state.content[kind].busy = busy;
+  refreshContentPane(kind);
+}
+
+function renderContentList(kind) {
+  const ct = state.content[kind];
+  const nodes = contentNodes(kind);
+  nodes.items.textContent = "";
+  if (!ct.items.length) {
+    nodes.items.append(el("li", { class: "empty" }, `No saved ${CONTENT_KINDS[kind].many} yet.`));
+    return;
+  }
+  for (const item of ct.items) {
+    const count = ct.counts[item.name];
+    nodes.items.append(el("li", { class: "ct-item", "data-name": item.name, "aria-current": item.name === ct.name ? "true" : null },
+      el("button", { type: "button", class: "ct-item-name", title: item.path, onclick: () => loadContentItem(kind, item.name) }, item.name),
+      el("span", { class: "badge" }, count === undefined ? null : plural(count, "entry", "entries")),
+      el("button", { type: "button", class: "danger-ghost mini", "aria-label": `Delete ${item.name}`, onclick: () => deleteContentItem(kind, item.name) }, "Delete")));
+  }
+}
+
+async function loadContentList(kind) {
+  const ct = state.content[kind];
+  try {
+    ct.items = (await GET(`/api/content/${kind}`)).items;
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
+  renderContentList(kind);
+}
+
+function confirmDiscard(kind, action) {
+  if (!contentDirty(kind)) return true;
+  return window.confirm(`The current ${CONTENT_KINDS[kind].one} has unsaved changes. ${action} and lose them?`);
+}
+
+async function loadContentItem(kind, name) {
+  const ct = state.content[kind];
+  if (!confirmDiscard(kind, `Load "${name}"`)) return;
+  setContentBusy(kind, true);
+  try {
+    const result = await GET(`/api/content/${kind}/${encodeURIComponent(name)}`);
+    const data = Array.isArray(result.data) ? result.data : isPlainObject(result.data) ? [result.data] : [];
+    ct.name = result.name;
+    ct.path = result.path;
+    ct.entries = data.map((raw) => CONTENT_MODEL[kind].fromFile(raw));
+    ct.savedText = JSON.stringify(serializeContent(kind));
+    ct.counts[ct.name] = ct.entries.length;
+    renderContentList(kind);
+    renderEntries(kind);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setContentBusy(kind, false);
+  }
+}
+
+function newContentItem(kind) {
+  const ct = state.content[kind];
+  if (!confirmDiscard(kind, `Start a new ${CONTENT_KINDS[kind].one}`)) return;
+  ct.name = null;
+  ct.path = null;
+  ct.entries = [];
+  ct.savedText = "[]";
+  renderContentList(kind);
+  renderEntries(kind);
+}
+
+async function saveContent(kind, name) {
+  const ct = state.content[kind];
+  if (!name) return false;
+  const data = serializeContent(kind);
+  setContentBusy(kind, true);
+  try {
+    const result = await api("PUT", `/api/content/${kind}/${encodeURIComponent(name)}`, { data });
+    ct.name = result.name;
+    ct.path = result.path;
+    ct.savedText = JSON.stringify(data);
+    ct.counts[ct.name] = data.length;
+    toast(`Saved ${result.path}.`);
+    await loadContentList(kind);
+    return true;
+  } catch (error) {
+    showError(error.message);
+    return false;
+  } finally {
+    setContentBusy(kind, false);
+  }
+}
+
+async function saveContentAs(kind) {
+  const ct = state.content[kind];
+  const nodes = contentNodes(kind);
+  const name = nodes.saveAsName.value.trim();
+  if (nodes.saveAsButton.disabled) return;
+  const exists = name !== ct.name && ct.items.some((item) => item.name === name);
+  if (exists && !window.confirm(`A ${CONTENT_KINDS[kind].one} named "${name}" exists. Replace it?`)) return;
+  if (await saveContent(kind, name)) {
+    nodes.saveAsName.value = "";
+    refreshContentPane(kind);
+  }
+}
+
+async function deleteContentItem(kind, name) {
+  const ct = state.content[kind];
+  const item = ct.items.find((candidate) => candidate.name === name);
+  if (!window.confirm(`Delete the ${CONTENT_KINDS[kind].one} "${name}"? This removes ${item ? item.path : name} from the working directory.`)) return;
+  setContentBusy(kind, true);
+  try {
+    await api("DELETE", `/api/content/${kind}/${encodeURIComponent(name)}`);
+    delete ct.counts[name];
+    if (ct.name === name) {
+      ct.name = null;
+      ct.path = null;
+      ct.savedText = "[]";
+    }
+    toast(`Deleted ${name}.`);
+    await loadContentList(kind);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setContentBusy(kind, false);
+  }
+}
+
+function useContentInLaunch(kind) {
+  const ct = state.content[kind];
+  const setting = CONTENT_KINDS[kind].setting;
+  if (!ct.path || !contentSettingKnown(kind)) return;
+  setOverride(setting, ct.path);
+  toast(`Set ${setting} to ${ct.path}`);
+  refreshContentPane(kind);
+}
+
+function openContentTab(kind) {
+  loadContentList(kind);
+  if (kind === "artifacts") refreshArtifactTypes();
+  refreshContentPane(kind);
+}
+
+function openContentItem(kind, name) {
+  switchTab(kind);
+  if (name) loadContentItem(kind, name);
 }
 
 /* ---------------- console ---------------- */
@@ -1318,12 +2089,12 @@ async function pollLog() {
 function switchTab(name) {
   state.tab = name;
   for (const tab of $$(".tab")) tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
-  $("#paneLaunch").hidden = name !== "launch";
-  $("#paneConsole").hidden = name !== "console";
+  for (const pane of $$(".pane")) pane.hidden = pane.dataset.tab !== name;
   if (name === "console") {
     pollProcs();
     pollLog();
   }
+  if (name in CONTENT_KINDS) openContentTab(name);
 }
 
 function onTabKey(event) {
@@ -1395,11 +2166,24 @@ function bindEvents() {
     }
   });
   $("#clearLog").addEventListener("click", () => { $("#logView").textContent = ""; });
+  for (const kind of Object.keys(CONTENT_KINDS)) {
+    const nodes = contentNodes(kind);
+    nodes.newButton.addEventListener("click", () => newContentItem(kind));
+    nodes.saveAsButton.addEventListener("click", () => saveContentAs(kind));
+    nodes.saveAsName.addEventListener("input", () => refreshContentPane(kind));
+    nodes.saveAsName.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") saveContentAs(kind);
+    });
+    nodes.saveButton.addEventListener("click", () => saveContent(kind, state.content[kind].name));
+    nodes.addButton.addEventListener("click", () => addEntry(kind));
+    nodes.useButton.addEventListener("click", () => useContentInLaunch(kind));
+  }
   window.addEventListener("pagehide", persistOnHide);
 }
 
 async function boot() {
   bindEvents();
+  for (const kind of Object.keys(CONTENT_KINDS)) renderEntries(kind);
   try {
     state.settings = await GET("/api/settings");
   } catch (error) {

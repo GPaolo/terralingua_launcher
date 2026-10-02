@@ -14,18 +14,6 @@ from pathlib import Path
 
 TIMEOUT = 180
 
-PRESET_LIST = """
-import json
-from terralingua.config.presets import list_presets
-try:
-    items = [{"name": n, "description": d, "location": l} for n, d, l in list_presets()]
-except (OSError, ValueError, TypeError, KeyError) as exc:
-    report = {"severity": "error", "code": "input", "field": None, "message": str(exc)}
-    print(json.dumps({"valid": False, "diagnostics": [report]}))
-else:
-    print(json.dumps({"valid": True, "presets": items}))
-"""
-
 
 class TargetError(Exception):
     """The target interpreter could not answer."""
@@ -89,14 +77,21 @@ def evaluate(python: str, workdir: Path, preset: str | None, overrides: dict, en
 
 def presets(python: str, workdir: Path, env: dict | None = None) -> list[dict]:
     """The presets the target finds: built-ins plus those under the working directory."""
-    return _accepted(_json(_run(python, workdir, ["-c", PRESET_LIST], env)))["presets"]
+    return _accepted(_json(_run(python, workdir, ["-m", "terralingua.config", "presets"], env)))["presets"]
+
+
+def artifact_types(python: str, workdir: Path, preset: str | None = None, env: dict | None = None) -> list[dict]:
+    """The artifact types a run can seed, with the parameters each one adds."""
+    args = ["-m", "terralingua.config", "artifact-types"]
+    if preset:
+        args += ["--preset", preset]
+    return _accepted(_json(_run(python, workdir, args, env)))["artifact_types"]
 
 
 def version(python: str, workdir: Path, env: dict | None = None) -> str | None:
     """The installed terralingua version, or None when it is not installed."""
-    code = "import importlib.metadata as m; print(m.version('terralingua'))"
     try:
-        return _run(python, workdir, ["-c", code], env).strip() or None
+        return _accepted(_json(_run(python, workdir, ["-m", "terralingua.config", "version"], env)))["version"]
     except TargetError:
         return None
 

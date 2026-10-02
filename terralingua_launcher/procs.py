@@ -37,6 +37,7 @@ class Proc:
     cwd: str
     log_path: str
     popen: subprocess.Popen = field(repr=False)
+    url: str | None = None
     started_at: float = field(default_factory=time.time)
 
     def status(self) -> str:
@@ -56,6 +57,7 @@ class Proc:
             "returncode": self.popen.poll(),
             "started_at": self.started_at,
             "log_path": self.log_path,
+            "url": self.url,
         }
 
 
@@ -66,7 +68,7 @@ class ProcRegistry:
         # endpoints run in FastAPI's threadpool; id allocation must be atomic
         self._lock = threading.Lock()
 
-    def spawn(self, label: str, argv: list, cwd: Path, env: dict | None = None) -> Proc:
+    def spawn(self, label: str, argv: list, cwd: Path, env: dict | None = None, url: str | None = None) -> Proc:
         """Start a child; an OSError means it could not start and leaves no log behind."""
         with self._lock:
             proc_id = self._next_id
@@ -100,6 +102,7 @@ class ProcRegistry:
             cwd=str(cwd),
             log_path=str(log_path),
             popen=popen,
+            url=url,
         )
         self._procs[proc.id] = proc
         return proc

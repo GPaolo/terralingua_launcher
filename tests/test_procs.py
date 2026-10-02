@@ -17,11 +17,10 @@ def test_a_split_character_waits_for_the_next_read():
             assert _without_partial_char(data[:-cut]) == text[:-1].encode()
 
 
-def test_state_file_must_hold_an_object(tmp_path, monkeypatch):
-    path = tmp_path / "state.json"
-    monkeypatch.setattr(store, "STATE_PATH", path)
-    assert store.load_state() == {}
-    path.write_text(json.dumps([1, 2]))
-    assert store.load_state() == {}
-    store.save_state({"workdir": "/x"})
-    assert store.load_state() == {"workdir": "/x"}
+def test_state_file_must_hold_an_object(tmp_path):
+    state = store.StateFile(tmp_path / "state.json")
+    assert state.load() == {}
+    state.path.write_text(json.dumps([1, 2]))
+    assert state.load() == {}
+    state.save({"workdir": "/x"})
+    assert state.load() == {"workdir": "/x"}

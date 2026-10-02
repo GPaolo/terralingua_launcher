@@ -17,7 +17,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from terralingua_launcher import server, store, target
+from terralingua_launcher import server, target
 
 WORKDIR = Path(os.environ.get("TL_LAUNCHER_TEST_WORKDIR", ".")).resolve()
 INSTALLED = target.version(sys.executable, WORKDIR) is not None
@@ -25,19 +25,21 @@ PRESETS = {p["name"] for p in target.presets(sys.executable, WORKDIR)} if INSTAL
 
 pytestmark = pytest.mark.skipif(not INSTALLED, reason="terralingua is not installed in this interpreter")
 needs_ebola = pytest.mark.skipif("ebola" not in PRESETS, reason="the ebola preset is not in the working directory")
+needs_example = pytest.mark.skipif("example" not in PRESETS, reason="the example preset is not in the working directory")
 
-FAKE_RUN = 'if [ "$1" = "-m" ] && [ "$2" = "terralingua" ]; then echo "fake run $@ mark=$TL_LAUNCHER_TEST_MARK"; {}; exit 0; fi\n'
-
-
-@pytest.fixture(autouse=True)
-def isolated_state(tmp_path, monkeypatch):
-    """Keep the user's launcher settings untouched."""
-    monkeypatch.setattr(store, "STATE_PATH", tmp_path / "state.json")
+# config commands go to the real interpreter; a run or a tool only echoes its arguments
+FAKE_RUN = 'if [ "$1" = "-m" ] && [ "$2" != "terralingua.config" ]; then echo "fake run $@ mark=$TL_LAUNCHER_TEST_MARK"; {}; exit 0; fi\n'
 
 
 @pytest.fixture
-def client():
-    with TestClient(server.create_app(WORKDIR, sys.executable)) as c:
+def state_path(tmp_path):
+    """The launcher's own state goes to a temporary file, never to the user's."""
+    return tmp_path / "state.json"
+
+
+@pytest.fixture
+def client(state_path):
+    with TestClient(server.create_app(WORKDIR, sys.executable, state_path)) as c:
         yield c
 
 
@@ -101,18 +103,19 @@ def test_settings_stay_unchanged_when_the_interpreter_is_rejected(client, tmp_pa
     assert client.get("/api/schema").status_code == 200
 
 
-def test_settings_accept_an_interpreter_name_found_on_the_path(client, fake_python, monkeypatch):
-    monkeypatch.setenv("PATH", str(Path(fake_python).parent) + os.pathsep + os.environ["PATH"])
-    data = client.post("/api/settings", json={"python": Path(fake_python).name}).json()
-    assert data["python"] == fake_python
-    assert data["python_ok"]
+def test_resolve_python_needs_an_executable_file(tmp_path, fake_python):
+    assert server.resolve_python(fake_python) == fake_python
+    plain = tmp_path / "plain"
+    plain.write_text("")
+    assert server.resolve_python(str(plain)) is None
+    assert server.resolve_python("/no/such/python") is None
 
 
-def test_state_is_remembered(client):
+def test_state_is_remembered(client, state_path):
     body = {"preset": "core", "overrides": {"env.grid_size": 7}, "resume": True}
     assert client.post("/api/state", json=body).json() == {"ok": True}
     assert client.get("/api/settings").json()["last"] == body
-    assert json.loads(store.STATE_PATH.read_text())["last"] == body
+    assert json.loads(state_path.read_text())["last"] == body
 
 
 def test_cross_origin_requests_are_refused(client):
@@ -132,9 +135,9 @@ def test_presets_include_the_working_directory(client):
     assert presets["ebola"]["location"].endswith("ebola.preset.yaml")
 
 
-def test_a_broken_preset_file_is_reported_as_a_request_error(workdir):
+def test_a_broken_preset_file_is_reported_as_a_request_error(workdir, state_path):
     (workdir / "bad.preset.yaml").write_text("name: [unclosed\n")
-    with TestClient(server.create_app(workdir, sys.executable)) as client:
+    with TestClient(server.create_app(workdir, sys.executable, state_path)) as client:
         response = client.get("/api/presets")
         assert response.status_code == 400
         assert "bad.preset.yaml" in response.json()["detail"]
@@ -256,8 +259,8 @@ def test_the_previewed_command_composes_the_evaluated_configuration(client, pres
     assert json.loads(out.stdout) == evaluated["resolved"]
 
 
-def test_save_preset_writes_a_file_the_target_discovers(workdir):
-    with TestClient(server.create_app(workdir, sys.executable)) as client:
+def test_save_preset_writes_a_file_the_target_discovers(workdir, state_path):
+    with TestClient(server.create_app(workdir, sys.executable, state_path)) as client:
         body = {"name": "My run", "description": "Small grid.", "preset": "core", "overrides": {"env.grid_size": 7}}
         response = client.post("/api/presets", json=body)
         assert response.status_code == 200, response.json()
@@ -291,9 +294,9 @@ def test_fs_completes_folders_and_executables(client, tmp_path):
     assert only_dirs == [f"{tmp_path}/alpha/"]
 
 
-def test_launch_runs_the_command_in_the_working_directory(workdir, fake_python):
+def test_launch_runs_the_command_in_the_working_directory(workdir, fake_python, state_path):
     (workdir / ".env").write_text("TL_LAUNCHER_TEST_MARK=hello\n")
-    with TestClient(server.create_app(workdir, fake_python)) as client:
+    with TestClient(server.create_app(workdir, fake_python, state_path)) as client:
         body = {"preset": "core", "overrides": {"env.grid_size": 9, "run.exp_name": "trial"}, "resume": False}
         proc = client.post("/api/launch", json=body).json()["proc"]
         assert proc["label"] == "trial"
@@ -311,11 +314,11 @@ def test_launch_runs_the_command_in_the_working_directory(workdir, fake_python):
         assert client.get("/api/settings").json()["last"] == body
 
 
-def test_switching_the_working_directory_changes_the_run_environment(workdir, tmp_path, fake_python):
+def test_switching_the_working_directory_changes_the_run_environment(workdir, tmp_path, fake_python, state_path):
     (workdir / ".env").write_text("TL_LAUNCHER_TEST_MARK=first\n")
     other = tmp_path / "other"
     other.mkdir()
-    with TestClient(server.create_app(workdir, fake_python)) as client:
+    with TestClient(server.create_app(workdir, fake_python, state_path)) as client:
         assert client.post("/api/settings", json={"workdir": str(other)}).status_code == 200
         proc = client.post("/api/launch", json={"preset": "core", "overrides": {}}).json()["proc"]
         wait_until_done(client, proc["id"])
@@ -324,26 +327,42 @@ def test_switching_the_working_directory_changes_the_run_environment(workdir, tm
         assert Path(proc["log_path"]).is_relative_to(other)
 
 
-def test_two_launches_in_the_same_second_get_separate_logs(workdir, fake_python):
-    with TestClient(server.create_app(workdir, fake_python)) as client:
+def test_two_launches_in_the_same_second_get_separate_logs(workdir, fake_python, state_path):
+    with TestClient(server.create_app(workdir, fake_python, state_path)) as client:
         body = {"preset": "core", "overrides": {}}
         first = client.post("/api/launch", json=body).json()["proc"]
         second = client.post("/api/launch", json=body).json()["proc"]
         assert first["log_path"] != second["log_path"]
 
 
-def test_stop_ends_a_running_process(workdir, sleeping_python):
-    with TestClient(server.create_app(workdir, sleeping_python)) as client:
+def test_stop_ends_a_running_process(workdir, sleeping_python, state_path):
+    with TestClient(server.create_app(workdir, sleeping_python, state_path)) as client:
         proc = client.post("/api/launch", json={"preset": "core", "overrides": {}}).json()["proc"]
         assert proc["status"] == "running"
         assert client.post(f"/api/procs/{proc['id']}/stop").json() == {"ok": True}
         assert wait_until_done(client, proc["id"])["status"] == "stopped"
 
 
-def test_launch_refuses_an_interpreter_that_cannot_run(workdir, tmp_path):
+def test_launch_refuses_an_interpreter_that_cannot_run(workdir, tmp_path, state_path):
     script = tmp_path / "not_executable"
     script.write_text("#!/bin/sh\n")
-    with TestClient(server.create_app(workdir, str(script))) as client:
+    with TestClient(server.create_app(workdir, str(script), state_path)) as client:
         assert not client.get("/api/settings").json()["python_ok"]
         response = client.post("/api/launch", json={"preset": "core", "overrides": {}})
         assert response.status_code == 400
+
+
+@needs_example
+def test_a_scenario_viewer_starts_on_a_free_port(fake_python, state_path):
+    with TestClient(server.create_app(WORKDIR, fake_python, state_path)) as client:
+        assert client.get("/api/schema", params={"preset": "example"}).json()["scenario"]["tools"]["viewer"]
+        data = client.post("/api/tools/viewer", json={"preset": "example"}).json()
+        assert data["url"].startswith("http://127.0.0.1:")
+        assert data["proc"]["url"] == data["url"]
+        assert data["proc"]["label"] == "viewer for example"
+        wait_until_done(client, data["proc"]["id"])
+        text = client.get(f"/api/procs/{data['proc']['id']}/log").json()["text"]
+        assert f"-m scenarios.example.viewer --logs {WORKDIR / 'logs'} --port {data['url'].rsplit(':', 1)[1]}" in text
+        response = client.post("/api/tools/anthropologist", json={"preset": "example"})
+        assert response.status_code == 400
+        assert "no anthropologist" in response.json()["detail"]
