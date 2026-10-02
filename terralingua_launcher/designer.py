@@ -31,7 +31,7 @@ You receive a description of the scenario the user wants, the current settings, 
 {reply_shape}
 
 Rules:
-1. instructions: Markdown. State facts about this scenario's world in plain, simple sentences. Do not tell beings what to do. Do not invent mechanics the engine does not have: no new actions, no stats, no rules about rewards. Keep every fact of the current instructions text that still applies.
+1. instructions: Markdown. State facts about this scenario's world in plain, simple sentences. Do not repeat the world rules above: energy, food, messages, artifacts and death are already in every being's prompt. Do not tell beings what to do. Do not invent mechanics the engine does not have: no new actions, no stats, no capacities, no rules about rewards. Keep every fact of the current instructions text that still applies.
 2. personas: one entry per persona. persona is 1 to 4 sentences in the second person ("You are ..."). name is a string or null; a name applies only when count is 1. count is a whole number of at least 1. The first beings created get them in order.
 3. artifacts: name is unique and snake_case. art_type is one of the types listed. payload is the content of the artifact; for a text artifact it is the inscription. pose is [row, col] on a grid world or a node id string on a graph world. lifespan is a whole number of steps, -1 for forever. movable says whether beings can carry it. params holds the type's own parameters only.
 4. suggested_params: only settings from the list, with a value of the right type, and one sentence why. Suggest few, and only when the scenario needs them.
