@@ -20,31 +20,24 @@ const DERIVED_LABELS = {
   hop_radius: "Hop radius",
 };
 
-/* Content files a run reads, saved under <workdir>/launcher_content/<kind>/.
-   `pattern` recognises a setting value that points at one of them. */
+/* Content files a run reads. `setting` is the core setting that names one; a scenario option
+   with the same name counts too. The server reports which setting applies and where its file
+   is (`state.sources`). New files go under <workdir>/launcher_content/<kind>/. */
 const CONTENT_KINDS = {
-  artifacts: {
-    setting: "env.init_artifacts_path",
-    tab: "Artifacts",
-    one: "artifact set",
-    many: "artifact sets",
-    entry: "Artifact",
-    pattern: /^(?:\.\/)?launcher_content\/artifacts\/([^/]+)\/?$/,
-  },
-  personas: {
-    setting: "agent.personas_path",
-    tab: "Personas",
-    one: "persona list",
-    many: "persona lists",
-    entry: "Persona",
-    pattern: /^(?:\.\/)?launcher_content\/personas\/([^/]+)\.json$/,
-  },
+  artifacts: { setting: "env.init_artifacts_path", tab: "Artifacts", one: "artifact set", many: "artifact sets", entry: "Artifact" },
+  personas: { setting: "agent.personas_path", tab: "Personas", one: "persona list", many: "persona lists", entry: "Persona" },
 };
+const INSTRUCTIONS_SETTING = "agent.scenario_specific_instructions";
 
 let entrySeq = 0;
 
+/* `path` is the editor's file, relative to the working directory; `saved` says it exists there;
+   `seen` is the configuration's file the editor last followed. */
 function newContentState() {
-  return { items: [], counts: {}, name: null, path: null, entries: [], savedText: "[]", busy: false, nodes: null };
+  return {
+    items: [], counts: {}, name: null, path: null, saved: false, writable: true, files: null,
+    entries: [], savedText: "[]", busy: false, seen: null, followed: null, loadSeq: 0, nodes: null,
+  };
 }
 
 const state = {
@@ -83,10 +76,12 @@ const state = {
   tab: "launch",
   toastTimer: null,
   content: { artifacts: newContentState(), personas: newContentState() },
+  sources: {},
   artifactTypes: { key: null, list: null, loading: false, cache: {}, seq: 0 },
   design: null,
   designBusy: false,
   designNameTouched: false,
+  designFolderTouched: false,
   loaded: false,
 };
 
@@ -287,6 +282,7 @@ async function saveSettings(event) {
     state.schemaCache = {};
     resetArtifactTypes();
     if (state.settings.workdir !== previousWorkdir) {
+      state.sources = {};
       for (const kind of Object.keys(CONTENT_KINDS)) {
         state.content[kind] = { ...newContentState(), nodes: state.content[kind].nodes };
         renderEntries(kind);
@@ -406,6 +402,7 @@ function showFormMessage(text) {
 async function selectPreset(name, refresh = false) {
   const previous = state.preset;
   state.preset = name;
+  if (name !== previous) state.sources = {};
   $("#presetSelect").value = name || "";
   renderPresetInfo();
   setFormBusy(true);
@@ -934,11 +931,11 @@ function buildRow(path, section) {
   const detailsNode = buildDetails(field);
   detailsNode.id = `${id}-details`;
   detailsNode.hidden = true;
-  const contentKind = Object.keys(CONTENT_KINDS).find((kind) => CONTENT_KINDS[kind].setting === path) || null;
+  const contentKind = contentKindOf(path);
   const contentLink = contentKind
     ? el("p", { class: "row-link", hidden: true }, el("button", {
-      type: "button", class: "link-chip", onclick: () => openContentItem(contentKind, state.rows[path].contentName),
-    }, `Edit in ${CONTENT_KINDS[contentKind].tab}`))
+      type: "button", class: "link-chip", onclick: () => openContentSource(contentKind),
+    }, contentKind in CONTENT_KINDS ? `Edit in ${CONTENT_KINDS[contentKind].tab}` : "Show in Scenario AI"))
     : null;
   const row = el("div", { class: "row", "data-path": path },
     label,
@@ -947,7 +944,7 @@ function buildRow(path, section) {
     contentLink, reasonNode, errorNode, detailsNode);
   state.rows[path] = {
     path, section, el: row, control, reset, detailsButton, changedMark, reasonNode, errorNode, errorText, detailsNode,
-    contentKind, contentLink, contentName: null,
+    contentKind, contentLink,
   };
   if (!field.children.length) return row;
   const children = el("div", { class: "children" });
@@ -1019,8 +1016,9 @@ function refreshRows() {
     if (!editing) row.control.setValue(displayValue(path));
     row.control.setDisabled(!fstate.active);
     if (row.contentLink) {
-      row.contentName = contentNameFromPath(row.contentKind, displayValue(path));
-      row.contentLink.hidden = !row.contentName;
+      const source = state.sources[row.contentKind];
+      const openable = !!source && source.setting === path && source.exists && (source.inside || row.contentKind === "instructions");
+      row.contentLink.hidden = !openable;
     }
     const describedBy = [fstate.active ? "" : row.reasonNode.id, errorText ? row.errorNode.id : ""].filter(Boolean);
     setAttr(row.control.input, "aria-describedby", describedBy.join(" ") || null);
@@ -1092,6 +1090,7 @@ function applyEvaluationResult(result, seq) {
       derived: result.derived || {},
     };
     renderDerived();
+    if (isPlainObject(result.content)) state.sources = result.content;
   }
   renderDiagnostics(result !== null);
   $("#statesNote").hidden = state.evalValid || !state.evaluation;
@@ -1099,6 +1098,7 @@ function applyEvaluationResult(result, seq) {
   updateActionButtons();
   refreshPreview();
   refreshContentPanes();
+  followSources();
 }
 
 function renderDiagnostics(answered) {
@@ -1172,12 +1172,57 @@ function updateActionButtons() {
   else if (!state.evalValid) reason = "The last check did not complete.";
   $("#launchBtn").disabled = !!reason;
   $("#savePresetBtn").disabled = !!reason;
+  const preset = currentPreset();
+  let updateReason = reason;
+  if (!updateReason && !preset) updateReason = "Pick a preset to update.";
+  else if (!updateReason && preset.location === "(built-in)") updateReason = `${preset.name} is built into TerraLingua. Save a new preset instead.`;
+  const update = $("#updatePresetBtn");
+  update.disabled = !!updateReason;
+  update.title = updateReason || `Write the current configuration to ${preset.location}.`;
   $("#launchHint").textContent = reason;
+}
+
+function currentPreset() {
+  return state.presets.find((p) => p.name === state.preset) || null;
 }
 
 /* ---------------- launch and save ---------------- */
 
-async function launch() {
+/* What a launch would leave unsaved: changed settings, and edits in the content editors. */
+function unsavedWork() {
+  const items = [];
+  const count = Object.keys(state.overrides).length;
+  if (count) {
+    items.push(`${plural(count, "changed setting is", "changed settings are")} not saved to a preset. The run still uses them: they go on the command line and into the run's params.json.`);
+  }
+  for (const kind of Object.keys(CONTENT_KINDS)) {
+    if (!contentDirty(kind)) continue;
+    const where = state.content[kind].path ? ` to ${state.content[kind].path}` : "";
+    items.push(`The ${CONTENT_KINDS[kind].tab} editor has unsaved changes${where}. The run reads the files as they are on disk, without them.`);
+  }
+  return items;
+}
+
+/* Launches at once when everything is saved; otherwise says what is not and asks first. */
+function launch() {
+  const unsaved = unsavedWork();
+  if (!unsaved.length) {
+    startRun();
+    return;
+  }
+  const list = $("#launchUnsaved");
+  list.textContent = "";
+  for (const item of unsaved) list.append(el("li", {}, item));
+  $("#launchDialog").showModal();
+}
+
+function confirmLaunch(event) {
+  event.preventDefault();
+  $("#launchDialog").close();
+  startRun();
+}
+
+async function startRun() {
   $("#launchBtn").disabled = true;
   try {
     const result = await POST("/api/launch", { preset: state.preset, overrides: state.overrides, resume: state.resume });
@@ -1251,19 +1296,61 @@ async function savePreset(event) {
     });
     $("#savePresetDialog").close();
     toast(`Saved ${result.path}.`);
-    const kept = state.overrides;
-    state.overrides = {};
-    state.jsonErrors = {};
-    state.schemaCache = {};
-    resetArtifactTypes();
-    await loadPresets();
-    const ok = await selectPreset(name);
-    if (!ok) {
-      state.overrides = kept;
-      afterChange();
-      return;
-    }
-    persistState();
+    await afterPresetWritten(name);
+  } catch (error) {
+    errorNode.textContent = error.message;
+    errorNode.hidden = false;
+  } finally {
+    confirmButton.disabled = false;
+  }
+}
+
+/* After a preset file was written, the changes are part of it: the form restarts from the file. */
+async function afterPresetWritten(name) {
+  const kept = state.overrides;
+  state.overrides = {};
+  state.jsonErrors = {};
+  state.schemaCache = {};
+  resetArtifactTypes();
+  beginEvaluation();
+  setFormBusy(true);
+  await loadPresets();
+  const ok = await selectPreset(name, true);
+  if (!ok) {
+    state.overrides = kept;
+    afterChange();
+    return;
+  }
+  persistState();
+}
+
+function openUpdatePreset() {
+  const preset = currentPreset();
+  if (!preset) return;
+  const count = Object.keys(state.overrides).length;
+  $("#updatePresetTitle").textContent = `Update preset ${preset.name}`;
+  $("#updatePresetText").textContent = count
+    ? `${plural(count, "changed setting becomes", "changed settings become")} part of the preset. The file ${preset.location} is rewritten.`
+    : `No setting changed; only the description can change. The file ${preset.location} is rewritten.`;
+  $("#updatePresetDescription").value = preset.description || "";
+  $("#updatePresetError").hidden = true;
+  $("#updatePresetDialog").showModal();
+}
+
+async function updatePreset(event) {
+  event.preventDefault();
+  const errorNode = $("#updatePresetError");
+  const confirmButton = $("#updatePresetConfirm");
+  const name = state.preset;
+  confirmButton.disabled = true;
+  try {
+    const result = await api("PUT", `/api/presets/${encodeURIComponent(name)}`, {
+      description: $("#updatePresetDescription").value.trim(),
+      overrides: state.overrides,
+    });
+    $("#updatePresetDialog").close();
+    toast(`Updated ${result.path}.`);
+    await afterPresetWritten(name);
   } catch (error) {
     errorNode.textContent = error.message;
     errorNode.hidden = false;
@@ -1281,12 +1368,14 @@ function contentNodes(kind) {
   ct.nodes = {
     pane,
     editor: $(".content-editor", pane),
+    title: $(".ct-title", pane),
+    source: $(".ct-source", pane),
     items: $(".ct-items", pane),
     newButton: $(".ct-new", pane),
-    saveAsName: $(".ct-save-as-name", pane),
+    openButton: $(".ct-open", pane),
     saveAsButton: $(".ct-save-as-btn", pane),
-    nameError: $(".ct-name-error", pane),
     titleName: $(".ct-title-name", pane),
+    inUse: $(".ct-inuse", pane),
     unsaved: $(".ct-unsaved", pane),
     saveButton: $(".ct-save", pane),
     addButton: $(".ct-add", pane),
@@ -1299,10 +1388,16 @@ function contentNodes(kind) {
   return ct.nodes;
 }
 
-function contentNameFromPath(kind, value) {
-  if (typeof value !== "string") return null;
-  const match = CONTENT_KINDS[kind].pattern.exec(value.trim());
-  return match ? match[1] : null;
+function coreSetting(kind) {
+  return kind === "instructions" ? INSTRUCTIONS_SETTING : CONTENT_KINDS[kind].setting;
+}
+
+/* The content kind a setting names: a core setting, or a scenario option with the same name. */
+function contentKindOf(path) {
+  const leaf = path.split(".").pop();
+  const option = path.startsWith(SCENARIO_PREFIX);
+  const kinds = [...Object.keys(CONTENT_KINDS), "instructions"];
+  return kinds.find((kind) => path === coreSetting(kind) || (option && leaf === coreSetting(kind).split(".").pop())) || null;
 }
 
 function contentNameError(name) {
@@ -1312,7 +1407,27 @@ function contentNameError(name) {
 }
 
 function contentSettingKnown(kind) {
-  return CONTENT_KINDS[kind].setting in state.fields;
+  return Object.keys(state.fields).some((path) => contentKindOf(path) === kind);
+}
+
+/* The setting that names this kind's file in the current configuration. */
+function contentSetting(kind) {
+  return state.sources[kind]?.setting || coreSetting(kind);
+}
+
+/* The value that setting takes for a file: relative to the working directory for a core setting;
+   for a scenario option, relative to the scenario's folder when the file is inside it, else absolute. */
+function settingValueFor(kind, path) {
+  const base = state.sources[kind] ? state.sources[kind].base : "";
+  if (base === "") return path;
+  if (base && path.startsWith(`${base}/`)) return path.slice(base.length + 1);
+  return `${state.settings?.workdir || ""}/${path}`;
+}
+
+function contentInUse(kind) {
+  const ct = state.content[kind];
+  const source = state.sources[kind];
+  return !!ct.path && ct.saved && !!source && source.relative === ct.path;
 }
 
 function toInt(text) {
@@ -1777,7 +1892,8 @@ function contentInfo(kind) {
   const ct = state.content[kind];
   const spec = CONTENT_KINDS[kind];
   const parts = [];
-  if (ct.path && displayValue(spec.setting) === ct.path) parts.push(`The launch form uses this ${spec.one}.`);
+  if (contentInUse(kind)) parts.push(`The launch form uses this ${spec.one} (${contentSetting(kind)}).`);
+  if (ct.files && ct.files.length > 1) parts.push(`The folder holds ${plural(ct.files.length, "JSON file", "JSON files")}: ${ct.files.join(", ")}.`);
   if (kind === "artifacts") {
     const types = state.artifactTypes;
     if (types.loading) parts.push("Loading artifact types…");
@@ -1814,29 +1930,33 @@ function refreshContentPane(kind) {
     }
   }
   const dirty = contentDirty(kind);
-  nodes.titleName.textContent = ct.name || `New ${spec.one}`;
+  const inUse = contentInUse(kind);
+  nodes.titleName.textContent = ct.path || `New ${spec.one}`;
+  nodes.inUse.hidden = !inUse;
   nodes.unsaved.hidden = !dirty;
   let reason = "";
   if (ct.busy) reason = "Working…";
   else if (problemCount) reason = `Fix ${plural(problemCount, "problem", "problems")} before you save.`;
-  else if (!ct.name && ct.entries.length) reason = `Type a name under "Save as" to save this new ${spec.one}.`;
-  else if (ct.name && !dirty) reason = "Nothing changed since the last save.";
+  else if (!ct.path && ct.entries.length) reason = `Use "Save as…" to save this new ${spec.one}.`;
+  else if (ct.path && !ct.writable) reason = "This folder holds several JSON files. Save the set under a new name to change it.";
+  else if (ct.path && ct.saved && !dirty) reason = "Nothing changed since the last save.";
   nodes.hint.textContent = reason;
-  nodes.saveButton.disabled = ct.busy || !!problemCount || !ct.name || !dirty;
-  const saveAsName = nodes.saveAsName.value.trim();
-  const nameError = saveAsName ? contentNameError(saveAsName) : "";
-  nodes.nameError.hidden = !nameError;
-  nodes.nameError.textContent = nameError;
-  nodes.saveAsButton.disabled = ct.busy || !!problemCount || !saveAsName || !!nameError;
+  nodes.saveButton.disabled = ct.busy || !!problemCount || !ct.path || !dirty || !ct.writable;
+  nodes.saveAsButton.disabled = ct.busy || !!problemCount;
+  nodes.openButton.disabled = ct.busy;
   let note = "";
   if (!state.schema) note = "Waiting for the settings to load.";
   else if (!contentSettingKnown(kind)) note = `This TerraLingua version has no ${kind} setting.`;
   nodes.note.hidden = !note;
   nodes.note.textContent = note;
-  nodes.useButton.disabled = ct.busy || !!note || !ct.path;
-  nodes.useButton.title = ct.path ? `Set ${spec.setting} to ${ct.path}` : `Save the ${spec.one} first.`;
+  nodes.useButton.disabled = ct.busy || !!note || !ct.path || !ct.saved || inUse;
+  if (!ct.path || !ct.saved) nodes.useButton.title = `Save the ${spec.one} first.`;
+  else if (inUse) nodes.useButton.title = "The launch form uses this file already.";
+  else nodes.useButton.title = `Set ${contentSetting(kind)} to ${settingValueFor(kind, ct.path)}`;
   nodes.info.textContent = contentInfo(kind);
-  for (const li of nodes.items.children) setAttr(li, "aria-current", li.dataset.name && li.dataset.name === ct.name ? "true" : null);
+  for (const node of [...nodes.items.children, ...$$("[data-path]", nodes.source)]) {
+    setAttr(node, "aria-current", node.dataset.path && node.dataset.path === ct.path ? "true" : null);
+  }
   nodes.editor.classList.toggle("busy", ct.busy);
   nodes.editor.setAttribute("aria-busy", String(ct.busy));
 }
@@ -1850,27 +1970,37 @@ function setContentBusy(kind, busy) {
   refreshContentPane(kind);
 }
 
+/* The files found in the suggested folders, grouped by folder. Only the launcher's own files can be deleted here. */
 function renderContentList(kind) {
   const ct = state.content[kind];
   const nodes = contentNodes(kind);
   nodes.items.textContent = "";
   if (!ct.items.length) {
-    nodes.items.append(el("li", { class: "empty" }, `No saved ${CONTENT_KINDS[kind].many} yet.`));
+    nodes.items.append(el("li", { class: "empty" }, `No ${CONTENT_KINDS[kind].many} found yet.`));
     return;
   }
+  let folder = null;
   for (const item of ct.items) {
-    const count = ct.counts[item.name];
-    nodes.items.append(el("li", { class: "ct-item", "data-name": item.name, "aria-current": item.name === ct.name ? "true" : null },
-      el("button", { type: "button", class: "ct-item-name", title: item.path, onclick: () => loadContentItem(kind, item.name) }, item.name),
+    if (item.folder !== folder) {
+      folder = item.folder;
+      nodes.items.append(el("li", { class: "ct-folder" }, folderLabel(folder)));
+    }
+    const count = ct.counts[item.path];
+    nodes.items.append(el("li", { class: "ct-item", "data-path": item.path, "aria-current": item.path === ct.path ? "true" : null },
+      el("button", { type: "button", class: "ct-item-name", title: item.path, onclick: () => loadContentPath(kind, item.path) }, item.name),
       el("span", { class: "badge" }, count === undefined ? null : plural(count, "entry", "entries")),
-      el("button", { type: "button", class: "danger-ghost mini", "aria-label": `Delete ${item.name}`, onclick: () => deleteContentItem(kind, item.name) }, "Delete")));
+      item.deletable
+        ? el("button", { type: "button", class: "danger-ghost mini", "aria-label": `Delete ${item.name}`, onclick: () => deleteContentItem(kind, item) }, "Delete")
+        : null));
   }
 }
 
 async function loadContentList(kind) {
   const ct = state.content[kind];
+  const query = new URLSearchParams();
+  for (const folder of suggestedFolders(kind)) query.append("folder", folder.path);
   try {
-    ct.items = (await GET(`/api/content/${kind}`)).items;
+    ct.items = (await GET(`/api/content/${kind}?${query}`)).items;
   } catch (error) {
     showError(error.message);
     return;
@@ -1883,119 +2013,404 @@ function confirmDiscard(kind, action) {
   return window.confirm(`The current ${CONTENT_KINDS[kind].one} has unsaved changes. ${action} and lose them?`);
 }
 
-/* Shows a file's content ({name, path, data}) in the editor as the saved state. */
+/* Shows a file ({name, path, data, files?, writable?}) in the editor as the saved state. */
 function showContentItem(kind, result) {
   const ct = state.content[kind];
   const data = Array.isArray(result.data) ? result.data : isPlainObject(result.data) ? [result.data] : [];
   ct.name = result.name;
   ct.path = result.path;
+  ct.saved = true;
+  ct.writable = result.writable !== false;
+  ct.files = Array.isArray(result.files) ? result.files : null;
   ct.entries = data.map((raw) => CONTENT_MODEL[kind].fromFile(raw));
   ct.savedText = JSON.stringify(serializeContent(kind));
-  ct.counts[ct.name] = ct.entries.length;
+  ct.counts[ct.path] = ct.entries.length;
   renderContentList(kind);
+  renderContentSource(kind);
   renderEntries(kind);
 }
 
-async function loadContentItem(kind, name) {
-  if (!confirmDiscard(kind, `Load "${name}"`)) return;
+/* Loads a file by its path under the working directory, such as the one the configuration names. */
+async function loadContentPath(kind, path, quiet = false) {
+  if (!quiet && !confirmDiscard(kind, `Load ${path}`)) return;
+  const ct = state.content[kind];
+  const seq = ++ct.loadSeq;
   setContentBusy(kind, true);
   try {
-    showContentItem(kind, await GET(`/api/content/${kind}/${encodeURIComponent(name)}`));
+    const result = await GET(`/api/files/${kind}?path=${encodeURIComponent(path)}`);
+    if (seq !== ct.loadSeq) return;
+    showContentItem(kind, result);
+    if (!quiet) contentNodes(kind).title.focus();
   } catch (error) {
     showError(error.message);
   } finally {
-    setContentBusy(kind, false);
+    if (seq === ct.loadSeq) setContentBusy(kind, false);
   }
+}
+
+function resetContentEditor(kind) {
+  Object.assign(state.content[kind], { name: null, path: null, saved: false, writable: true, files: null, entries: [], savedText: "[]" });
 }
 
 function newContentItem(kind) {
-  const ct = state.content[kind];
   if (!confirmDiscard(kind, `Start a new ${CONTENT_KINDS[kind].one}`)) return;
-  ct.name = null;
-  ct.path = null;
-  ct.entries = [];
-  ct.savedText = "[]";
+  resetContentEditor(kind);
   renderContentList(kind);
+  renderContentSource(kind);
   renderEntries(kind);
 }
 
-async function saveContent(kind, name) {
+/* An empty editor for a file the configuration names but that does not exist yet. */
+function startContentAt(kind, path) {
+  if (!confirmDiscard(kind, `Start ${path}`)) return;
+  resetContentEditor(kind);
+  Object.assign(state.content[kind], { path, name: path.split("/").pop() });
+  renderContentList(kind);
+  renderContentSource(kind);
+  renderEntries(kind);
+}
+
+function afterContentSaved(kind, result, data) {
   const ct = state.content[kind];
-  if (!name) return false;
+  ct.name = result.name;
+  ct.path = result.path;
+  ct.saved = true;
+  ct.writable = true;
+  ct.files = null;
+  ct.savedText = JSON.stringify(data);
+  ct.counts[ct.path] = data.length;
+  renderContentSource(kind);
+  toast(`Saved ${result.path}.`);
+  scheduleEvaluate();
+}
+
+/* Writes the editor back to its file, wherever it is under the working directory. */
+async function saveContent(kind) {
+  const ct = state.content[kind];
+  if (!ct.path) return;
   const data = serializeContent(kind);
   setContentBusy(kind, true);
   try {
-    const result = await api("PUT", `/api/content/${kind}/${encodeURIComponent(name)}`, { data });
-    ct.name = result.name;
-    ct.path = result.path;
-    ct.savedText = JSON.stringify(data);
-    ct.counts[ct.name] = data.length;
-    toast(`Saved ${result.path}.`);
-    scheduleEvaluate();
+    afterContentSaved(kind, await api("PUT", `/api/files/${kind}`, { path: ct.path, data }), data);
     await loadContentList(kind);
-    return true;
   } catch (error) {
     showError(error.message);
-    return false;
   } finally {
     setContentBusy(kind, false);
   }
 }
 
-async function saveContentAs(kind) {
+async function deleteContentItem(kind, item) {
   const ct = state.content[kind];
-  const nodes = contentNodes(kind);
-  const name = nodes.saveAsName.value.trim();
-  if (nodes.saveAsButton.disabled) return;
-  const exists = name !== ct.name && ct.items.some((item) => item.name === name);
-  if (exists && !window.confirm(`A ${CONTENT_KINDS[kind].one} named "${name}" exists. Replace it?`)) return;
-  if (await saveContent(kind, name)) {
-    nodes.saveAsName.value = "";
-    refreshContentPane(kind);
-  }
-}
-
-async function deleteContentItem(kind, name) {
-  const ct = state.content[kind];
-  const item = ct.items.find((candidate) => candidate.name === name);
-  if (!window.confirm(`Delete the ${CONTENT_KINDS[kind].one} "${name}"? This removes ${item ? item.path : name} from the working directory.`)) return;
+  if (!window.confirm(`Delete the ${CONTENT_KINDS[kind].one} "${item.name}"? This removes ${item.path} from the working directory.`)) return;
   setContentBusy(kind, true);
   try {
-    await api("DELETE", `/api/content/${kind}/${encodeURIComponent(name)}`);
-    delete ct.counts[name];
-    if (ct.name === name) {
-      ct.name = null;
-      ct.path = null;
-      ct.savedText = "[]";
+    await api("DELETE", `/api/content/${kind}/${encodeURIComponent(item.name)}`);
+    delete ct.counts[item.path];
+    if (ct.path === item.path) {
+      // the entries stay in the editor as an unsaved new list
+      Object.assign(ct, { name: null, path: null, saved: false, writable: true, files: null, savedText: "[]" });
     }
-    toast(`Deleted ${name}.`);
+    toast(`Deleted ${item.name}.`);
     scheduleEvaluate();
     await loadContentList(kind);
   } catch (error) {
     showError(error.message);
   } finally {
     setContentBusy(kind, false);
+  }
+}
+
+/* ---- where files go: the save and open dialogs ---- */
+
+let dialogKind = null;
+
+function dirname(path) {
+  const index = path.lastIndexOf("/");
+  return index < 0 ? "" : path.slice(0, index);
+}
+
+function folderLabel(folder) {
+  return folder ? `${folder}/` : "the working directory";
+}
+
+/* A folder or file typed by the user, relative to the working directory ("" is the directory itself);
+   null when it lies outside. */
+function normalizePath(text) {
+  let path = text.trim();
+  const workdir = state.settings?.workdir || "";
+  if (workdir && path === workdir) return "";
+  if (workdir && path.startsWith(`${workdir}/`)) path = path.slice(workdir.length + 1);
+  if (path.startsWith("/")) return null;
+  path = path.replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+  if (path === ".") return "";
+  if (path.split("/").includes("..")) return null;
+  return path;
+}
+
+/* The file a name goes to in a folder. The launcher's own folder keeps one subfolder per kind. */
+function targetPath(kind, folder, name) {
+  const base = folder === "launcher_content" ? `launcher_content/${kind}` : folder;
+  const suffix = kind === "artifacts" ? "" : kind === "instructions" ? ".md" : ".json";
+  return `${base ? `${base}/` : ""}${name}${suffix}`;
+}
+
+function addFolder(list, path, why) {
+  if (path === null || path === undefined || list.some((folder) => folder.path === path)) return;
+  list.push({ path, why });
+}
+
+/* Folders a kind's files can go to, the most natural first: where the setting reads them,
+   beside the preset or the current file, then the launcher's own folder. */
+function suggestedFolders(kind) {
+  const folders = [];
+  const source = state.sources[kind];
+  const preset = currentPreset();
+  const presetFolder = preset && preset.location !== "(built-in)" ? dirname(preset.location) : null;
+  if (source?.setting.startsWith(SCENARIO_PREFIX)) addFolder(folders, source.base, "where the scenario reads them");
+  else addFolder(folders, presetFolder, "beside the preset");
+  if (source?.relative) addFolder(folders, dirname(source.relative), "beside the file in the configuration");
+  if (state.content[kind]?.path) addFolder(folders, dirname(state.content[kind].path), "the folder of the file in the editor");
+  addFolder(folders, `launcher_content/${kind}`, "the launcher's own folder");
+  return folders;
+}
+
+/* Folders for the files a design writes: the scenario's folder, the preset's folder, the launcher's own. */
+function designFolders() {
+  const folders = [];
+  const scenario = Object.values(state.sources).find((source) => source.setting.startsWith(SCENARIO_PREFIX) && source.base !== null);
+  if (scenario) addFolder(folders, scenario.base, "where the scenario reads its files");
+  const preset = currentPreset();
+  if (preset && preset.location !== "(built-in)") addFolder(folders, dirname(preset.location), "beside the preset");
+  addFolder(folders, "launcher_content", "the launcher's own folder");
+  return folders;
+}
+
+function folderChips(holder, folders, onPick) {
+  holder.textContent = "";
+  for (const folder of folders) {
+    holder.append(el("button", { type: "button", class: "folder-chip", onclick: () => onPick(folder.path) },
+      el("code", {}, folderLabel(folder.path)), ` ${folder.why}`));
+  }
+}
+
+/* Completion of paths under the working directory, typed relative to it. */
+function bindRelativeCompletion(input, list, options) {
+  input.addEventListener("input", debounce(async () => {
+    const workdir = state.settings?.workdir;
+    if (!workdir) return;
+    const opts = typeof options === "function" ? options() : options;
+    const typed = input.value.trim().replace(/^(\.\/)+/, "");
+    const query = new URLSearchParams({ prefix: typed.startsWith("/") ? typed : `${workdir}/${typed}`, dirs_only: String(!!opts.dirsOnly) });
+    if (opts.suffix) query.set("suffix", opts.suffix);
+    try {
+      const result = await GET(`/api/fs?${query}`);
+      list.textContent = "";
+      for (const path of result.paths) {
+        list.append(el("option", { value: path.startsWith(`${workdir}/`) ? path.slice(workdir.length + 1) : path }));
+      }
+    } catch (error) {
+      showError(error.message);
+    }
+  }, 150));
+}
+
+async function fileExists(kind, path) {
+  try {
+    await GET(`/api/files/${kind}?path=${encodeURIComponent(path)}`);
+    return true;
+  } catch (error) {
+    if (error.status === 404) return false;
+    throw error;
+  }
+}
+
+function openSaveDialog(kind) {
+  const ct = state.content[kind];
+  dialogKind = kind;
+  const folders = suggestedFolders(kind);
+  $("#contentSaveTitle").textContent = `Save the ${CONTENT_KINDS[kind].one} as`;
+  $("#contentSaveName").value = ct.path ? (ct.name || "").replace(/\.json$/, "") : "";
+  $("#contentSaveFolder").value = folders[0].path;
+  folderChips($("#contentSaveChips"), folders, (path) => {
+    $("#contentSaveFolder").value = path;
+    refreshSaveDialog();
+  });
+  $("#contentSaveError").hidden = true;
+  refreshSaveDialog();
+  $("#contentSaveDialog").showModal();
+}
+
+function saveDialogTarget() {
+  const kind = dialogKind;
+  const name = $("#contentSaveName").value.trim();
+  const folder = normalizePath($("#contentSaveFolder").value);
+  let error = "";
+  if (!name) error = "Type a name.";
+  else if (contentNameError(name)) error = contentNameError(name);
+  else if (folder === null) error = "The folder must be inside the working directory.";
+  return { kind, name, folder, path: error ? null : targetPath(kind, folder, name), error };
+}
+
+function refreshSaveDialog() {
+  const { kind, path, error } = saveDialogTarget();
+  const preview = $("#contentSavePreview");
+  $("#contentSaveConfirm").disabled = !!error;
+  if (error) {
+    preview.textContent = error;
+    return;
+  }
+  const what = kind === "artifacts" ? `the folder ${path}/ with artifacts.json` : path;
+  preview.textContent = `Writes ${what}. "Use in launch" then sets ${contentSetting(kind)} to ${settingValueFor(kind, path)}.`;
+}
+
+async function submitSaveDialog(event) {
+  event.preventDefault();
+  const { kind, path, error } = saveDialogTarget();
+  if (error) return;
+  const errorNode = $("#contentSaveError");
+  const button = $("#contentSaveConfirm");
+  button.disabled = true;
+  try {
+    const replacing = path !== state.content[kind].path && await fileExists(kind, path);
+    if (replacing && !window.confirm(`${path} exists. Replace it?`)) return;
+    const data = serializeContent(kind);
+    afterContentSaved(kind, await api("PUT", `/api/files/${kind}`, { path, data }), data);
+    $("#contentSaveDialog").close();
+    await loadContentList(kind);
+  } catch (failure) {
+    errorNode.textContent = failure.message;
+    errorNode.hidden = false;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openOpenDialog(kind) {
+  dialogKind = kind;
+  $("#contentOpenTitle").textContent = `Open a ${CONTENT_KINDS[kind].one}`;
+  $("#contentOpenPath").value = "";
+  $("#contentOpenError").hidden = true;
+  $("#contentOpenDialog").showModal();
+}
+
+async function submitOpenDialog(event) {
+  event.preventDefault();
+  const kind = dialogKind;
+  const errorNode = $("#contentOpenError");
+  const path = normalizePath($("#contentOpenPath").value);
+  if (!path) {
+    errorNode.textContent = "Type the path of a file inside the working directory.";
+    errorNode.hidden = false;
+    return;
+  }
+  if (!confirmDiscard(kind, `Load ${path}`)) return;
+  try {
+    showContentItem(kind, await GET(`/api/files/${kind}?path=${encodeURIComponent(path)}`));
+    $("#contentOpenDialog").close();
+    loadContentList(kind);
+  } catch (failure) {
+    errorNode.textContent = failure.message;
+    errorNode.hidden = false;
   }
 }
 
 function useContentInLaunch(kind) {
   const ct = state.content[kind];
-  const setting = CONTENT_KINDS[kind].setting;
-  if (!ct.path || !contentSettingKnown(kind)) return;
-  setOverride(setting, ct.path);
-  toast(`Set ${setting} to ${ct.path}`);
+  const setting = contentSetting(kind);
+  if (!ct.path || !ct.saved || !(setting in state.fields)) return;
+  const value = settingValueFor(kind, ct.path);
+  setOverride(setting, value);
+  toast(`Set ${setting} to ${value}`);
   refreshContentPane(kind);
 }
 
 function openContentTab(kind) {
   loadContentList(kind);
   if (kind === "artifacts") refreshArtifactTypes();
+  renderContentSource(kind);
   refreshContentPane(kind);
 }
 
-function openContentItem(kind, name) {
+/* Opens a kind's tab on the file the configuration names. */
+function openContentSource(kind) {
+  if (kind === "instructions") {
+    switchTab("design");
+    return;
+  }
   switchTab(kind);
-  if (name) loadContentItem(kind, name);
+  const source = state.sources[kind];
+  if (source?.exists && source.inside && state.content[kind].path !== source.relative) loadContentPath(kind, source.relative);
+}
+
+/* ---- the file the configuration names ---- */
+
+function sourceKey(source) {
+  return source ? JSON.stringify([source.setting, source.path, source.exists]) : "";
+}
+
+function renderContentSource(kind) {
+  const nodes = contentNodes(kind);
+  const spec = CONTENT_KINDS[kind];
+  const source = state.sources[kind];
+  const ct = state.content[kind];
+  const holder = nodes.source;
+  holder.textContent = "";
+  if (!state.schema) {
+    holder.append(el("p", { class: "hint" }, "Waiting for the settings to load."));
+    return;
+  }
+  if (!source) {
+    holder.append(el("p", { class: "hint" }, "Known once the configuration is valid."));
+    return;
+  }
+  const setting = el("p", { class: "hint" }, "Named by ", el("code", {}, source.setting), ".");
+  if (!source.value) {
+    holder.append(el("p", { class: "hint" }, `The configuration names no ${spec.one}.`), setting);
+    return;
+  }
+  const where = source.relative || source.path;
+  if (!source.inside) {
+    holder.append(el("p", { class: "ct-source-path" }, where),
+      el("p", { class: "hint" }, "Outside the working directory. The launcher cannot open it."), setting);
+    return;
+  }
+  if (!source.exists) {
+    holder.append(el("p", { class: "ct-source-path" }, where), el("p", { class: "hint" }, "Not found."),
+      el("button", { type: "button", class: "mini", onclick: () => startContentAt(kind, where) }, "Create it here"), setting);
+    return;
+  }
+  const count = ct.counts[where];
+  const files = source.files && source.files.length !== 1 ? plural(source.files.length, "JSON file", "JSON files") : null;
+  holder.append(
+    el("div", { class: "ct-item", "data-path": where, "aria-current": where === ct.path ? "true" : null },
+      el("button", { type: "button", class: "ct-item-name", title: where, onclick: () => loadContentPath(kind, where) }, where),
+      el("span", { class: "badge" }, count === undefined ? files : plural(count, "entry", "entries"))),
+    setting);
+}
+
+/* The editor of each content tab follows the file the configuration names, unless it holds unsaved changes. */
+function followSources() {
+  for (const kind of Object.keys(CONTENT_KINDS)) {
+    const ct = state.content[kind];
+    const source = state.sources[kind] || null;
+    const key = sourceKey(source);
+    renderContentSource(kind);
+    if (key !== ct.seen) {
+      ct.seen = key;
+      loadContentList(kind);
+    }
+    if (key === ct.followed || contentDirty(kind)) continue;
+    ct.followed = key;
+    if (source?.exists && source.inside) {
+      if (ct.path !== source.relative) loadContentPath(kind, source.relative, true);
+    } else if (ct.path) {
+      resetContentEditor(kind);
+      renderEntries(kind);
+    }
+  }
+  renderCurrentInstructions();
+  renderDesignFolders();
 }
 
 /* ---------------- scenario AI: a model writes the scenario content ---------------- */
@@ -2004,6 +2419,42 @@ const DESIGN_PARTS = { instructions: "Instructions", personas: "Personas", artif
 
 function listOf(value) {
   return Array.isArray(value) ? value : [];
+}
+
+/* The instructions text the configuration gives every being, as the server read it. */
+function renderCurrentInstructions() {
+  const source = state.sources.instructions;
+  const line = $("#currentInstructionsSource");
+  const text = $("#currentInstructionsText");
+  line.textContent = "";
+  text.hidden = true;
+  text.textContent = "";
+  if (!state.schema) {
+    line.textContent = "Waiting for the settings to load.";
+    return;
+  }
+  if (!source) {
+    line.textContent = "Known once the configuration is valid.";
+    return;
+  }
+  const setting = el("code", {}, source.setting);
+  if (!source.value || source.builtin === "none") {
+    line.append("No instructions text: ", setting, source.value ? ' is "none".' : " is not set.");
+    return;
+  }
+  if (source.builtin) {
+    line.append(`TerraLingua's built-in text "${source.builtin}", named by `, setting, ". The launcher cannot show it.");
+    return;
+  }
+  const where = source.relative || source.path;
+  if (!source.exists) {
+    line.append(setting, ` points at ${where}, which does not exist.`);
+    return;
+  }
+  line.append(`From ${where}, named by `, setting, source.truncated ? ". The first part:" : ":");
+  text.hidden = false;
+  text.textContent = source.text || "(The file is empty.)";
+  text.classList.toggle("empty-text", !source.text);
 }
 
 function defaultDesignName(description) {
@@ -2017,6 +2468,23 @@ function onDesignDescriptionInput() {
 
 function onDesignNameInput() {
   state.designNameTouched = $("#designName").value !== "";
+  refreshDesignActions();
+}
+
+function onDesignFolderInput() {
+  state.designFolderTouched = $("#designFolder").value !== "";
+  refreshDesignActions();
+}
+
+/* The folder the design's files go to: suggested from the configuration unless the user typed one. */
+function renderDesignFolders() {
+  const folders = designFolders();
+  folderChips($("#designFolderChips"), folders, (path) => {
+    $("#designFolder").value = path;
+    state.designFolderTouched = true;
+    refreshDesignActions();
+  });
+  if (!state.designFolderTouched) $("#designFolder").value = folders[0].path;
   refreshDesignActions();
 }
 
@@ -2114,6 +2582,7 @@ function refreshDesignActions() {
   if (blocking) reason = "The design has problems. Ask for changes under Refine.";
   else if (!name) reason = "Type a name for the content files.";
   else if (contentNameError(name)) reason = contentNameError(name);
+  else if (normalizePath($("#designFolder").value) === null) reason = "The folder must be inside the working directory.";
   else if (!$("#designInstructions").value.trim()) reason = "The instructions text is empty.";
   $("#designBtn").disabled = state.designBusy;
   $("#designRefine").disabled = state.designBusy || !state.design || !$("#designFeedback").value.trim();
@@ -2156,9 +2625,10 @@ async function requestDesign(refine) {
   }
 }
 
-/* Writes the content files, then sets every override at once and evaluates once. */
+/* Writes the content files into the chosen folder, then sets every override at once and evaluates once. */
 async function applyDesign() {
   const name = $("#designName").value.trim();
+  const folder = normalizePath($("#designFolder").value);
   const design = currentDesign();
   const writes = [["instructions", design.instructions]];
   if (listOf(design.personas).length) writes.push(["personas", design.personas]);
@@ -2166,20 +2636,17 @@ async function applyDesign() {
   $("#designError").hidden = true;
   setDesignBusy("Saving the files…");
   try {
-    const lists = await Promise.all(writes.map(([kind]) => GET(`/api/content/${kind}`)));
-    const taken = writes.filter((write, index) => lists[index].items.some((item) => item.name === name)).map(([kind]) => kind);
-    if (taken.length && !window.confirm(`"${name}" exists in ${taken.join(", ")}. Replace it?`)) return;
-    const paths = {};
-    for (const [kind, data] of writes) {
-      const result = await api("PUT", `/api/content/${kind}/${encodeURIComponent(name)}`, { data });
-      paths[kind] = result.path;
+    const targets = writes.map(([kind]) => targetPath(kind, folder, name));
+    const existing = await Promise.all(targets.map((path, index) => fileExists(writes[index][0], path)));
+    const taken = targets.filter((path, index) => existing[index]);
+    if (taken.length && !window.confirm(`${taken.join(", ")} ${taken.length === 1 ? "exists" : "exist"}. Replace?`)) return;
+    const values = {};
+    for (const [index, [kind, data]] of writes.entries()) {
+      const result = await api("PUT", `/api/files/${kind}`, { path: targets[index], data });
+      if (contentSettingKnown(kind)) values[contentSetting(kind)] = settingValueFor(kind, result.path);
       if (!(kind in CONTENT_KINDS)) continue;
-      if (state.content[kind].name === name) showContentItem(kind, { ...result, data });
+      if (state.content[kind].path === result.path) showContentItem(kind, { ...result, data });
       loadContentList(kind);
-    }
-    const values = { "agent.scenario_specific_instructions": paths.instructions };
-    for (const kind of Object.keys(CONTENT_KINDS)) {
-      if (paths[kind] && contentSettingKnown(kind)) values[CONTENT_KINDS[kind].setting] = paths[kind];
     }
     const suggested = listOf(design.suggested_params);
     for (const box of $$("#designParams input:checked:not(:disabled)")) {
@@ -2204,9 +2671,11 @@ function clearDesign() {
   if (state.design && !window.confirm("Clear the design and the description?")) return;
   state.design = null;
   state.designNameTouched = false;
+  state.designFolderTouched = false;
   $("#designForm").reset();
   $("#designFeedback").value = "";
   $("#designError").hidden = true;
+  renderDesignFolders();
   renderDesign();
 }
 
@@ -2382,6 +2851,7 @@ function switchTab(name) {
     pollLog();
   }
   if (name in CONTENT_KINDS) openContentTab(name);
+  if (name === "design") renderDesignFolders();
 }
 
 function onTabKey(event) {
@@ -2442,7 +2912,12 @@ function bindEvents() {
   $("#savePresetBtn").addEventListener("click", openSavePreset);
   $("#savePresetCancel").addEventListener("click", () => $("#savePresetDialog").close());
   $("#savePresetForm").addEventListener("submit", savePreset);
+  $("#updatePresetBtn").addEventListener("click", openUpdatePreset);
+  $("#updatePresetCancel").addEventListener("click", () => $("#updatePresetDialog").close());
+  $("#updatePresetForm").addEventListener("submit", updatePreset);
   $("#launchBtn").addEventListener("click", launch);
+  $("#launchForm").addEventListener("submit", confirmLaunch);
+  $("#launchCancel").addEventListener("click", () => $("#launchDialog").close());
   $("#followSwitch").addEventListener("change", (event) => {
     state.follow = event.target.checked;
     if (state.follow) scrollLogToEnd();
@@ -2468,21 +2943,32 @@ function bindEvents() {
   for (const kind of Object.keys(CONTENT_KINDS)) {
     const nodes = contentNodes(kind);
     nodes.newButton.addEventListener("click", () => newContentItem(kind));
-    nodes.saveAsButton.addEventListener("click", () => saveContentAs(kind));
-    nodes.saveAsName.addEventListener("input", () => refreshContentPane(kind));
-    nodes.saveAsName.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") saveContentAs(kind);
-    });
-    nodes.saveButton.addEventListener("click", () => saveContent(kind, state.content[kind].name));
+    nodes.openButton.addEventListener("click", () => openOpenDialog(kind));
+    nodes.saveAsButton.addEventListener("click", () => openSaveDialog(kind));
+    nodes.saveButton.addEventListener("click", () => saveContent(kind));
     nodes.addButton.addEventListener("click", () => addEntry(kind));
     nodes.useButton.addEventListener("click", () => useContentInLaunch(kind));
   }
+  $("#contentSaveForm").addEventListener("submit", submitSaveDialog);
+  $("#contentSaveCancel").addEventListener("click", () => $("#contentSaveDialog").close());
+  $("#contentSaveName").addEventListener("input", refreshSaveDialog);
+  $("#contentSaveFolder").addEventListener("input", refreshSaveDialog);
+  bindRelativeCompletion($("#contentSaveFolder"), $("#contentFolderList"), { dirsOnly: true });
+  $("#contentOpenForm").addEventListener("submit", submitOpenDialog);
+  $("#contentOpenCancel").addEventListener("click", () => $("#contentOpenDialog").close());
+  bindRelativeCompletion($("#contentOpenPath"), $("#contentOpenList"), () => (dialogKind === "artifacts" ? { dirsOnly: true } : { suffix: ".json" }));
+  $("#designFolder").addEventListener("input", onDesignFolderInput);
+  bindRelativeCompletion($("#designFolder"), $("#designFolderList"), { dirsOnly: true });
   window.addEventListener("pagehide", persistOnHide);
 }
 
 async function boot() {
   bindEvents();
-  for (const kind of Object.keys(CONTENT_KINDS)) renderEntries(kind);
+  for (const kind of Object.keys(CONTENT_KINDS)) {
+    renderEntries(kind);
+    renderContentSource(kind);
+  }
+  renderCurrentInstructions();
   try {
     state.settings = await GET("/api/settings");
   } catch (error) {

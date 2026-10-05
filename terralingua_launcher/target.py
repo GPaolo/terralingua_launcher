@@ -96,6 +96,27 @@ def version(python: str, workdir: Path, env: dict | None = None) -> str | None:
         return None
 
 
+def module_dir(python: str, workdir: Path, module: str, env: dict | None = None) -> str | None:
+    """The folder of a package the target interpreter imports, or None.
+
+    Not a TerraLingua command: a scenario reads its own files from its folder,
+    and only the target interpreter knows where the package is.
+    """
+    code = (
+        "import importlib.util, json, pathlib, sys\n"
+        "spec = importlib.util.find_spec(sys.argv[1])\n"
+        "where = None\n"
+        "if spec is not None:\n"
+        "    places = list(spec.submodule_search_locations or [])\n"
+        "    where = places[0] if places else (str(pathlib.Path(spec.origin).parent) if spec.origin else None)\n"
+        "print(json.dumps({'dir': where}))\n"
+    )
+    try:
+        return _json(_run(python, workdir, ["-c", code, module], env)).get("dir")
+    except TargetError:
+        return None
+
+
 def launcher_version() -> str:
     try:
         return importlib.metadata.version("terralingua-launcher")

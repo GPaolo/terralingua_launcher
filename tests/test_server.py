@@ -296,6 +296,75 @@ def test_save_preset_writes_a_file_the_target_discovers(workdir, state_path):
         assert sorted(p.name for p in workdir.glob("*.preset.yaml")) == ["My_run.preset.yaml"]
 
 
+def test_update_preset_rewrites_its_file(workdir, state_path):
+    with TestClient(server.create_app(workdir, sys.executable, state_path)) as client:
+        body = {"name": "My run", "description": "Small grid.", "preset": "core", "overrides": {"env.grid_size": 7}}
+        path = Path(client.post("/api/presets", json=body).json()["path"])
+        update = {"overrides": {"env.grid_size": 9, "run.max_ts": 5}, "description": "Bigger grid."}
+        response = client.put("/api/presets/My run", json=update)
+        assert response.status_code == 200, response.json()
+        assert Path(response.json()["path"]) == path
+        data = yaml.safe_load(path.read_text())
+        assert data["name"] == "My run" and data["description"] == "Bigger grid."
+        assert data["config"]["env"]["grid_size"] == 9 and data["config"]["run"]["max_ts"] == 5
+        evaluated = client.post("/api/evaluate", json={"preset": "My run", "overrides": {}}).json()
+        assert evaluated["active_values"]["env.grid_size"] == 9
+        assert client.put("/api/presets/My run", json={"overrides": {}}).json()["ok"]
+        assert yaml.safe_load(path.read_text())["description"] == "Bigger grid."
+        assert client.put("/api/presets/core", json={"overrides": {}}).status_code == 400
+        assert client.put("/api/presets/nothing", json={"overrides": {}}).status_code == 404
+        broken = client.put("/api/presets/My run", json={"overrides": {"run.max_ts": "abc"}})
+        assert broken.status_code == 400 and "not valid" in broken.json()["detail"]
+        assert yaml.safe_load(path.read_text())["config"]["run"]["max_ts"] == 5
+
+
+def test_evaluate_names_the_content_files_of_a_preset(workdir, state_path):
+    sub = workdir / "sub"
+    (sub / "seeds").mkdir(parents=True)
+    (sub / "personas.json").write_text(json.dumps([{"persona": "You heal.", "name": "Ada", "count": 1}]))
+    (sub / "instructions.md").write_text("Be kind.\n")
+    (sub / "seeds" / "signs.json").write_text(json.dumps([{"name": "sign", "art_type": "text", "payload": "Hi", "pose": [1, 1]}]))
+    config = {
+        "agent": {"personas_path": "personas.json", "scenario_specific_instructions": "instructions.md"},
+        "env": {"init_artifacts_path": "seeds"},
+    }
+    (sub / "sub_run.preset.yaml").write_text(yaml.safe_dump({"name": "sub_run", "config": config}))
+    with TestClient(server.create_app(workdir, sys.executable, state_path)) as client:
+        data = client.post("/api/evaluate", json={"preset": "sub_run", "overrides": {}}).json()
+        assert data["valid"], data["diagnostics"]
+        found = data["content"]
+        assert found["personas"]["setting"] == "agent.personas_path"
+        assert found["personas"]["relative"] == "sub/personas.json"
+        assert found["personas"]["exists"] and found["personas"]["inside"]
+        assert found["instructions"]["text"] == "Be kind.\n"
+        assert found["artifacts"]["files"] == ["signs.json"]
+        assert all(found[kind]["base"] == "" for kind in found)
+        # a preset saved from it at the root reaches the same files
+        saved = client.post("/api/presets", json={"name": "Root run", "preset": "sub_run", "overrides": {"env.grid_size": 9}})
+        assert saved.status_code == 200, saved.json()
+        root_config = yaml.safe_load(Path(saved.json()["path"]).read_text())["config"]
+        assert root_config["agent"]["personas_path"] == "sub/personas.json"
+        assert root_config["agent"]["scenario_specific_instructions"] == "sub/instructions.md"
+        assert root_config["env"]["init_artifacts_path"] == "sub/seeds"
+        again = client.post("/api/evaluate", json={"preset": "Root run", "overrides": {}}).json()
+        assert again["valid"], again["diagnostics"]
+        assert again["content"]["personas"]["relative"] == "sub/personas.json"
+        # an invalid configuration names nothing
+        broken = client.post("/api/evaluate", json={"preset": "sub_run", "overrides": {"run.max_ts": "abc"}}).json()
+        assert not broken["valid"] and "content" not in broken
+        # updating the preset in its subfolder keeps its paths relative to that folder
+        updated = client.put("/api/presets/sub_run", json={"overrides": {"env.grid_size": 11}})
+        assert updated.status_code == 200, updated.json()
+        sub_config = yaml.safe_load((sub / "sub_run.preset.yaml").read_text())["config"]
+        assert sub_config["agent"] == {"personas_path": "personas.json", "scenario_specific_instructions": "instructions.md"}
+        assert sub_config["env"] == {"init_artifacts_path": "seeds", "grid_size": 11}
+
+
+def test_module_dir_comes_from_the_target(tmp_path):
+    assert target.module_dir(sys.executable, tmp_path, "json") == str(Path(json.__file__).parent)
+    assert target.module_dir(sys.executable, tmp_path, "no_such_module_at_all") is None
+
+
 def test_fs_completes_folders_and_executables(client, tmp_path):
     (tmp_path / "alpha").mkdir()
     (tmp_path / "notes.txt").write_text("x")
@@ -306,6 +375,8 @@ def test_fs_completes_folders_and_executables(client, tmp_path):
     assert str(tmp_path / "notes.txt") not in paths
     only_dirs = client.get("/api/fs", params={"prefix": f"{tmp_path}/a", "dirs_only": "true"}).json()["paths"]
     assert only_dirs == [f"{tmp_path}/alpha/"]
+    by_suffix = client.get("/api/fs", params={"prefix": f"{tmp_path}/", "suffix": ".txt"}).json()["paths"]
+    assert by_suffix == [f"{tmp_path}/alpha/", str(tmp_path / "notes.txt")]
 
 
 def test_launch_runs_the_command_in_the_working_directory(workdir, fake_python, state_path):

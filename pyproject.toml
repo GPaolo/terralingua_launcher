@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "terralingua-launcher"
-version = "0.2.0"
+version = "0.3.0"
 description = "Web UI that configures and launches TerraLingua simulations"
 requires-python = ">=3.10"
 dependencies = [

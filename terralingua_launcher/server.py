@@ -15,14 +15,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import uvicorn
-import yaml
 from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from terralingua_launcher import command, content, designer, store, target
+from terralingua_launcher import command, content, designer, presets, store, target
 from terralingua_launcher.procs import ProcRegistry
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -88,6 +87,7 @@ def create_app(
     app.state.last = state.get("last") or {}
     app.state.tool_ports = tool_ports_of(state.get("tool_ports"))
     app.state.schema_cache = {}  # (python, workdir, preset) -> description
+    app.state.module_cache = {}  # (python, workdir, module) -> the scenario package's folder
     app.state.procs = ProcRegistry()
 
     @app.middleware("http")
@@ -127,6 +127,55 @@ def create_app(
         fields = dict(description.get("fields", {}))
         fields.update((description.get("scenario") or {}).get("fields", {}))
         return fields
+
+    def flat_values(result: dict, fields: dict) -> dict:
+        """Every setting's value in a valid evaluation, the scenario options included."""
+        values = {**result.get("inactive_values", {}), **result.get("active_values", {})}
+        options = ((result.get("resolved") or {}).get("run") or {}).get("scenario_options")
+        for path in fields:
+            if not path.startswith(command.OPTION_PREFIX):
+                continue
+            cursor, found = options, True
+            for key in path[len(command.OPTION_PREFIX):].split("."):
+                if not isinstance(cursor, dict) or key not in cursor:
+                    found = False
+                    break
+                cursor = cursor[key]
+            if found:
+                values[path] = cursor
+            elif "default" in fields[path]:  # an option the preset leaves at the scenario's default
+                values[path] = fields[path]["default"]
+        return values
+
+    def preset_file(name: str | None, listing: list[dict]) -> tuple[Path, dict] | None:
+        """A file preset's path under the working directory and its raw config; None for a built-in or no preset."""
+        found = next((p for p in listing if p["name"] == name), None) if name else None
+        if found is None or found["location"] == "(built-in)":
+            return None
+        root = Path(app.state.env.get("TL_PRESET_ROOT") or app.state.workdir)
+        try:
+            path = content.inside(app.state.workdir, root / found["location"])
+        except content.ContentError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not path.is_file():
+            raise HTTPException(400, f"{found['location']} is not a file")
+        return path, presets.read_config(path)
+
+    def scenario_dir(preset: str | None) -> Path | None:
+        """The folder of the preset's scenario package, found by the target interpreter."""
+        module = (schema(preset).get("scenario") or {}).get("module")
+        if not module:
+            return None
+        key = (app.state.python, str(app.state.workdir), module)
+        if key not in app.state.module_cache:
+            found = target.module_dir(app.state.python, app.state.workdir, module, env=app.state.env)
+            app.state.module_cache[key] = Path(found) if found else None
+        return app.state.module_cache[key]
+
+    def content_sources(preset: str | None, evaluated: dict) -> dict:
+        """The content files a valid configuration names, by kind."""
+        fields = all_fields(schema(preset))
+        return content.sources(app.state.workdir, fields, flat_values(evaluated, fields), scenario_dir(preset))
 
     def overrides_of(body: dict) -> dict:
         overrides = body.get("overrides")
@@ -176,12 +225,13 @@ def create_app(
         app.state.workdir, app.state.python, app.state.env = workdir, python, env
         app.state.tool_ports = tool_ports
         app.state.schema_cache = {}
+        app.state.module_cache = {}
         persist()
         return get_settings()
 
     @app.get("/api/fs")
-    def fs_complete(prefix: str = "", dirs_only: bool = False):
-        """Path completion for the settings fields: folder and executable names only."""
+    def fs_complete(prefix: str = "", dirs_only: bool = False, suffix: str | None = None):
+        """Path completion: folders, plus executables (the settings) or files with a suffix (content files)."""
         raw = prefix or "~/"
         p = Path(raw).expanduser()
         base, partial = (p, "") if raw.endswith("/") else (p.parent, p.name)
@@ -195,7 +245,12 @@ def create_app(
                     continue
                 if entry.is_dir():
                     out.append(str(entry) + "/")
-                elif not dirs_only and os.access(entry, os.X_OK):
+                elif dirs_only:
+                    continue
+                elif suffix is not None:
+                    if name.endswith(suffix):
+                        out.append(str(entry))
+                elif os.access(entry, os.X_OK):
                     out.append(str(entry))
                 if len(out) >= 50:
                     break
@@ -226,7 +281,12 @@ def create_app(
 
     @app.post("/api/evaluate")
     def evaluate(body: dict):
-        return ask(target.evaluate, body.get("preset") or None, command.normalized(overrides_of(body)))
+        """TerraLingua's evaluation, plus `content`: the files a valid configuration names."""
+        preset = body.get("preset") or None
+        result = ask(target.evaluate, preset, command.normalized(overrides_of(body)))
+        if result.get("valid"):
+            result["content"] = content_sources(preset, result)
+        return result
 
     @app.post("/api/preview")
     def preview(body: dict):
@@ -240,17 +300,42 @@ def create_app(
         name = str(body.get("name") or "").strip()
         if not name or name.startswith("-") or not store.slug(name).strip("_"):
             raise HTTPException(400, "the preset needs a name made of letters, digits, spaces, '-' or '_'")
-        if any(p["name"] == name for p in ask(target.presets)):
+        listing = ask(target.presets)
+        if any(p["name"] == name for p in listing):
             raise HTTPException(400, f"a preset named '{name}' exists already")
-        result = ask(target.evaluate, body.get("preset") or None, command.normalized(overrides_of(body)))
+        source = body.get("preset") or None
+        result = ask(target.evaluate, source, command.normalized(overrides_of(body)))
         if not result.get("valid", False):
             messages = "; ".join(d["message"] for d in result.get("diagnostics", []))
             raise HTTPException(400, f"the configuration is not valid: {messages}")
         path = app.state.workdir / f"{store.slug(name)}.preset.yaml"
         if path.exists():
             raise HTTPException(400, f"{path.name} exists already")
-        data = {"name": name, "description": str(body.get("description") or ""), "config": result["requested"]}
-        path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        origin = preset_file(source, listing)
+        raw, raw_dir = (origin[1], origin[0].parent) if origin else (None, None)
+        config = content.rebase_paths(result["requested"], app.state.workdir, path.parent, raw, raw_dir)
+        path.write_text(presets.text(name, str(body.get("description") or ""), config))
+        app.state.schema_cache = {}
+        return {"ok": True, "path": str(path)}
+
+    @app.put("/api/presets/{name}")
+    def update_preset(name: str, body: dict):
+        """Write the composed configuration back to an existing preset file."""
+        listing = ask(target.presets)
+        found = next((p for p in listing if p["name"] == name), None)
+        if found is None:
+            raise HTTPException(404, f"no preset named '{name}'")
+        origin = preset_file(name, listing)
+        if origin is None:
+            raise HTTPException(400, f"'{name}' is built into TerraLingua; save a new preset instead")
+        path, raw = origin
+        result = ask(target.evaluate, name, command.normalized(overrides_of(body)))
+        if not result.get("valid", False):
+            messages = "; ".join(d["message"] for d in result.get("diagnostics", []))
+            raise HTTPException(400, f"the configuration is not valid: {messages}")
+        description = body["description"] if "description" in body else found.get("description")
+        config = content.rebase_paths(result["requested"], app.state.workdir, path.parent, raw, path.parent)
+        path.write_text(presets.text(name, str(description or ""), config))
         app.state.schema_cache = {}
         return {"ok": True, "path": str(path)}
 
@@ -267,8 +352,9 @@ def create_app(
             raise HTTPException(400, f"could not read the file: {exc}") from exc
 
     @app.get("/api/content/{kind}")
-    def list_content(kind: str):
-        return {"items": content_call(content.list_items, kind)}
+    def list_content(kind: str, folder: list[str] = Query(default=[])):
+        """The files of a kind in the folders the page suggests, then in the launcher's own folder."""
+        return {"items": content_call(content.list_items, kind, folder)}
 
     @app.get("/api/content/{kind}/{name}")
     def read_content(kind: str, name: str):
@@ -284,6 +370,17 @@ def create_app(
     def delete_content(kind: str, name: str):
         content_call(content.delete_item, kind, name)
         return {"ok": True}
+
+    @app.get("/api/files/{kind}")
+    def read_file(kind: str, path: str):
+        """A content file anywhere under the working directory, such as one a preset names."""
+        return content_call(content.read_path, kind, path)
+
+    @app.put("/api/files/{kind}")
+    def write_file(kind: str, body: dict):
+        if not isinstance(body.get("path"), str) or "data" not in body:
+            raise HTTPException(400, "the body needs 'path' and 'data' fields")
+        return content_call(content.write_path, kind, body["path"], body["data"])
 
     @app.get("/api/artifact_types")
     def get_artifact_types(preset: str | None = None):
@@ -315,16 +412,16 @@ def create_app(
             raise HTTPException(400, "fix the configuration before designing: " + "; ".join(
                 d["message"] for d in evaluated.get("diagnostics", []) if d["severity"] == "error"
             ))
-        values = {**evaluated.get("inactive_values", {}), **evaluated.get("active_values", {})}
-        instructions = values.get("agent.scenario_specific_instructions")
+        values = flat_values(evaluated, fields)
+        instructions = content_sources(preset, evaluated)["instructions"]
         context = {
             "world_type": values.get("env.world_type"),
             "init_agents": values.get("env.init_agents"),
             "fields": fields,
             "values": values,
             "artifact_types": ask(target.artifact_types, preset),
-            "instructions_source": instructions if isinstance(instructions, str) else "none",
-            "instructions_text": file_text(instructions),
+            "instructions_source": instructions["value"] or "none",
+            "instructions_text": file_text(instructions["path"]) if instructions["exists"] else "",
         }
         model = str(body.get("model") or designer.DEFAULT_MODEL)
         api_key = str(body.get("api_key") or "") or designer.key_for(model, app.state.env)

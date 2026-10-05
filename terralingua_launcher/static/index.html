@@ -82,7 +82,10 @@
               <pre id="cmdPreview" class="cmd" tabindex="0" aria-label="Command line preview"></pre>
             </section>
             <div class="side-actions">
-              <button id="savePresetBtn" type="button" disabled>Save as preset</button>
+              <div class="preset-actions">
+                <button id="updatePresetBtn" type="button" disabled>Update preset</button>
+                <button id="savePresetBtn" type="button" disabled>Save new preset</button>
+              </div>
               <button id="launchBtn" type="button" class="primary big" disabled>Launch</button>
               <p id="launchHint" class="hint" aria-live="polite"></p>
               <div id="toolButtons" class="tool-buttons" role="group" aria-label="Scenario tools" hidden></div>
@@ -94,22 +97,22 @@
       <section id="paneArtifacts" class="pane" role="tabpanel" aria-labelledby="tabArtifacts" data-tab="artifacts" hidden>
         <div class="content-grid">
           <aside class="panel content-side">
-            <h2>Saved artifact sets</h2>
-            <ul class="ct-items" aria-label="Saved artifact sets"></ul>
+            <h2>In the configuration</h2>
+            <div class="ct-source" aria-live="polite"></div>
+            <h2>Artifact sets</h2>
+            <ul class="ct-items" aria-label="Artifact sets found"></ul>
             <div class="ct-side-actions">
-              <button type="button" class="ct-new">New</button>
-              <div class="ct-save-as">
-                <label for="artifactsSaveAsName">Save as</label>
-                <input id="artifactsSaveAsName" class="ct-save-as-name" type="text" spellcheck="false" autocomplete="off" placeholder="name">
-                <button type="button" class="ct-save-as-btn" disabled>Save as</button>
+              <div class="ct-buttons">
+                <button type="button" class="ct-new">New</button>
+                <button type="button" class="ct-open">Open…</button>
+                <button type="button" class="ct-save-as-btn">Save as…</button>
               </div>
-              <p class="ct-name-error" role="alert" hidden></p>
-              <p class="hint">The run reads every JSON file in the set's folder. The setting <code>env.init_artifacts_path</code> takes the folder path.</p>
+              <p class="hint">The run reads every JSON file in the folder that <code>env.init_artifacts_path</code> names, or a scenario option of that name. "Save as…" asks where a set goes; the folder the setting reads from comes first.</p>
             </div>
           </aside>
           <div class="panel content-editor" aria-busy="false">
             <div class="ct-head">
-              <h2 class="ct-title"><span class="ct-title-name">New artifact set</span> <span class="ct-unsaved" hidden>(unsaved)</span></h2>
+              <h2 class="ct-title" tabindex="-1"><span class="ct-title-name">New artifact set</span> <span class="ct-inuse" hidden>(in the configuration)</span> <span class="ct-unsaved" hidden>(unsaved)</span></h2>
               <div class="ct-actions">
                 <button type="button" class="ct-save primary" disabled>Save</button>
                 <button type="button" class="ct-add">Add entry</button>
@@ -127,22 +130,22 @@
       <section id="panePersonas" class="pane" role="tabpanel" aria-labelledby="tabPersonas" data-tab="personas" hidden>
         <div class="content-grid">
           <aside class="panel content-side">
-            <h2>Saved persona lists</h2>
-            <ul class="ct-items" aria-label="Saved persona lists"></ul>
+            <h2>In the configuration</h2>
+            <div class="ct-source" aria-live="polite"></div>
+            <h2>Persona lists</h2>
+            <ul class="ct-items" aria-label="Persona lists found"></ul>
             <div class="ct-side-actions">
-              <button type="button" class="ct-new">New</button>
-              <div class="ct-save-as">
-                <label for="personasSaveAsName">Save as</label>
-                <input id="personasSaveAsName" class="ct-save-as-name" type="text" spellcheck="false" autocomplete="off" placeholder="name">
-                <button type="button" class="ct-save-as-btn" disabled>Save as</button>
+              <div class="ct-buttons">
+                <button type="button" class="ct-new">New</button>
+                <button type="button" class="ct-open">Open…</button>
+                <button type="button" class="ct-save-as-btn">Save as…</button>
               </div>
-              <p class="ct-name-error" role="alert" hidden></p>
-              <p class="hint">The first beings, in creation order, get these personas. The setting <code>agent.personas_path</code> takes the file path.</p>
+              <p class="hint">The first beings, in creation order, get these personas. <code>agent.personas_path</code> names the file, or a scenario option of that name. "Save as…" asks where a list goes; the folder the setting reads from comes first.</p>
             </div>
           </aside>
           <div class="panel content-editor" aria-busy="false">
             <div class="ct-head">
-              <h2 class="ct-title"><span class="ct-title-name">New persona list</span> <span class="ct-unsaved" hidden>(unsaved)</span></h2>
+              <h2 class="ct-title" tabindex="-1"><span class="ct-title-name">New persona list</span> <span class="ct-inuse" hidden>(in the configuration)</span> <span class="ct-unsaved" hidden>(unsaved)</span></h2>
               <div class="ct-actions">
                 <button type="button" class="ct-save primary" disabled>Save</button>
                 <button type="button" class="ct-add">Add entry</button>
@@ -180,6 +183,13 @@
               <input id="designName" type="text" spellcheck="false" autocomplete="off" aria-describedby="designNameHint">
               <span id="designNameHint" class="hint">The content files get this name.</span>
             </div>
+            <div class="field">
+              <label for="designFolder">Folder</label>
+              <input id="designFolder" type="text" list="designFolderList" spellcheck="false" autocomplete="off" aria-describedby="designFolderHint">
+              <datalist id="designFolderList"></datalist>
+              <div id="designFolderChips" class="folder-chips"></div>
+              <span id="designFolderHint" class="hint">Where the files go, under the working directory.</span>
+            </div>
             <div class="design-actions">
               <button type="submit" id="designBtn" class="primary">Design</button>
               <button type="button" id="designClear">Clear</button>
@@ -187,48 +197,55 @@
             </div>
             <p id="designError" class="dialog-error" role="alert" hidden></p>
           </form>
-          <div id="designResult" class="design-result" hidden>
+          <div class="design-right">
             <section class="panel">
-              <h2>Design notes</h2>
-              <p id="designNotes" class="design-notes"></p>
+              <h2>Current instructions</h2>
+              <p id="currentInstructionsSource" class="hint" aria-live="polite">Waiting for the settings to load.</p>
+              <pre id="currentInstructionsText" class="instructions-text" tabindex="0" aria-label="The current instructions text" hidden></pre>
             </section>
-            <section class="panel">
-              <h2>Instructions</h2>
-              <label for="designInstructions" class="hint">The text for <code>agent.scenario_specific_instructions</code>. You can edit it before you apply.</label>
-              <textarea id="designInstructions" rows="12"></textarea>
-            </section>
-            <section class="panel">
-              <h2>Personas</h2>
-              <div id="designPersonas" class="design-cards"></div>
-            </section>
-            <section class="panel">
-              <h2>Artifacts</h2>
-              <div id="designArtifacts" class="design-cards"></div>
-            </section>
-            <section class="panel">
-              <h2>Suggested settings</h2>
-              <table id="designParams" class="design-table">
-                <thead><tr><th scope="col">Use</th><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Why</th></tr></thead>
-                <tbody></tbody>
-              </table>
-              <p id="designParamsEmpty" class="hint" hidden>No suggested settings.</p>
-            </section>
-            <section id="designIssuesPanel" class="panel" hidden>
-              <h2>Problems</h2>
-              <ul id="designIssues" class="design-issues"></ul>
-            </section>
-            <section class="panel">
-              <h2>Refine or apply</h2>
-              <div class="design-refine">
-                <label for="designFeedback">Change request</label>
-                <input id="designFeedback" type="text" autocomplete="off" placeholder="Fewer farmers. One storm every ten steps.">
-                <button type="button" id="designRefine">Refine</button>
-              </div>
-              <div class="design-actions">
-                <button type="button" id="designApply" class="primary">Apply</button>
-                <span id="designApplyHint" class="hint" aria-live="polite"></span>
-              </div>
-            </section>
+            <div id="designResult" class="design-result" hidden>
+              <section class="panel">
+                <h2>Design notes</h2>
+                <p id="designNotes" class="design-notes"></p>
+              </section>
+              <section class="panel">
+                <h2>Instructions</h2>
+                <label for="designInstructions" class="hint">The text for <code>agent.scenario_specific_instructions</code>. You can edit it before you apply.</label>
+                <textarea id="designInstructions" rows="12"></textarea>
+              </section>
+              <section class="panel">
+                <h2>Personas</h2>
+                <div id="designPersonas" class="design-cards"></div>
+              </section>
+              <section class="panel">
+                <h2>Artifacts</h2>
+                <div id="designArtifacts" class="design-cards"></div>
+              </section>
+              <section class="panel">
+                <h2>Suggested settings</h2>
+                <table id="designParams" class="design-table">
+                  <thead><tr><th scope="col">Use</th><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Why</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+                <p id="designParamsEmpty" class="hint" hidden>No suggested settings.</p>
+              </section>
+              <section id="designIssuesPanel" class="panel" hidden>
+                <h2>Problems</h2>
+                <ul id="designIssues" class="design-issues"></ul>
+              </section>
+              <section class="panel">
+                <h2>Refine or apply</h2>
+                <div class="design-refine">
+                  <label for="designFeedback">Change request</label>
+                  <input id="designFeedback" type="text" autocomplete="off" placeholder="Fewer farmers. One storm every ten steps.">
+                  <button type="button" id="designRefine">Refine</button>
+                </div>
+                <div class="design-actions">
+                  <button type="button" id="designApply" class="primary">Apply</button>
+                  <span id="designApplyHint" class="hint" aria-live="polite"></span>
+                </div>
+              </section>
+            </div>
           </div>
         </div>
       </section>
@@ -277,10 +294,36 @@
     </form>
   </dialog>
 
+  <dialog id="launchDialog" aria-labelledby="launchDialogTitle">
+    <form method="dialog" id="launchForm">
+      <h2 id="launchDialogTitle">Launch without saving?</h2>
+      <ul id="launchUnsaved" class="unsaved-list"></ul>
+      <p class="hint">To keep them, cancel and use "Update preset", "Save new preset" or the editor's Save.</p>
+      <div class="actions">
+        <button type="button" id="launchCancel">Cancel</button>
+        <button type="submit" id="launchConfirm" class="primary">Launch anyway</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="updatePresetDialog" aria-labelledby="updatePresetTitle">
+    <form method="dialog" id="updatePresetForm">
+      <h2 id="updatePresetTitle">Update preset</h2>
+      <p id="updatePresetText" class="hint"></p>
+      <label for="updatePresetDescription">Description</label>
+      <textarea id="updatePresetDescription" rows="2"></textarea>
+      <p id="updatePresetError" class="dialog-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="updatePresetCancel">Cancel</button>
+        <button type="submit" id="updatePresetConfirm" class="primary">Update</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="savePresetDialog" aria-labelledby="savePresetTitle">
     <form method="dialog" id="savePresetForm">
-      <h2 id="savePresetTitle">Save as preset</h2>
-      <p class="hint">The current preset and your changes become a new preset file in the working directory.</p>
+      <h2 id="savePresetTitle">Save new preset</h2>
+      <p class="hint">The current preset and your changes become a new preset file in the working directory. The current preset stays as it is.</p>
       <label for="savePresetName">Name</label>
       <input id="savePresetName" type="text" required spellcheck="false" autocomplete="off">
       <label for="savePresetDescription">Description</label>
@@ -289,6 +332,38 @@
       <div class="actions">
         <button type="button" id="savePresetCancel">Cancel</button>
         <button type="submit" id="savePresetConfirm" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="contentSaveDialog" aria-labelledby="contentSaveTitle">
+    <form method="dialog" id="contentSaveForm">
+      <h2 id="contentSaveTitle">Save as</h2>
+      <label for="contentSaveName">Name</label>
+      <input id="contentSaveName" type="text" required spellcheck="false" autocomplete="off">
+      <label for="contentSaveFolder">Folder, under the working directory</label>
+      <input id="contentSaveFolder" type="text" list="contentFolderList" spellcheck="false" autocomplete="off">
+      <datalist id="contentFolderList"></datalist>
+      <div id="contentSaveChips" class="folder-chips" aria-label="Suggested folders"></div>
+      <p id="contentSavePreview" class="hint" aria-live="polite"></p>
+      <p id="contentSaveError" class="dialog-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="contentSaveCancel">Cancel</button>
+        <button type="submit" id="contentSaveConfirm" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="contentOpenDialog" aria-labelledby="contentOpenTitle">
+    <form method="dialog" id="contentOpenForm">
+      <h2 id="contentOpenTitle">Open</h2>
+      <label for="contentOpenPath">File, under the working directory</label>
+      <input id="contentOpenPath" type="text" list="contentOpenList" spellcheck="false" autocomplete="off">
+      <datalist id="contentOpenList"></datalist>
+      <p id="contentOpenError" class="dialog-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="contentOpenCancel">Cancel</button>
+        <button type="submit" id="contentOpenConfirm" class="primary">Open</button>
       </div>
     </form>
   </dialog>

@@ -7,7 +7,7 @@ The launcher drives a **working directory** with a **Python interpreter**:
 - The working directory holds the presets (`*.preset.yaml`) and any scenario package. Runs write their logs under `logs/` inside it, unless `TL_LOGS_DIR` says otherwise. This is the folder you would run `terralingua` from.
 - The interpreter has `terralingua` installed. It runs the simulations.
 
-The launcher never imports TerraLingua itself. It runs `python -m terralingua.config` in the interpreter: `describe` for the settings and their dependencies, `evaluate` for the state of a configuration, `presets`, `artifact-types` and `version`. New settings added to TerraLingua appear in the form without changes to the launcher.
+The launcher never imports TerraLingua itself. It runs `python -m terralingua.config` in the interpreter: `describe` for the settings and their dependencies, `evaluate` for the state of a configuration, `presets`, `artifact-types` and `version`. It also asks that interpreter where a preset's scenario package lives. New settings added to TerraLingua appear in the form without changes to the launcher.
 
 ## Install
 
@@ -35,20 +35,21 @@ The page opens at http://127.0.0.1:7000 (`--host` and `--port` change this). Bot
 - Settings that do not apply with the current values are hidden. For example, the grid size is hidden when the world type is a graph. "Show inactive settings" lists them greyed out with the reason.
 - The diagnostics panel shows errors, warnings and notes from TerraLingua's validation. Launch stays disabled while there are errors.
 - The command preview shows the exact `terralingua` command that will run. Only the changed settings appear on it; the preset carries the rest.
-- "Save as preset" writes the current configuration as a new preset file in the working directory. The file name is the preset name with spaces and punctuation replaced by `_`.
+- "Update preset" writes the current configuration back to the selected preset's file, so your changes become part of it; it can also change just the description. Built-in presets cannot be updated. "Save new preset" writes it as a new preset file in the working directory instead; the file name is the preset name with spaces and punctuation replaced by `_`. In both cases the paths TerraLingua resolved relative to the source preset, and the instructions, personas and artifacts files, are written relative to the preset file, as TerraLingua reads them; a file outside the working directory keeps its absolute path.
+- Launch asks first when changed settings are not saved to a preset, or an editor has unsaved changes, and says what the run will and will not use.
 - "Resume from the latest checkpoint" adds `--resume`.
 
 **Artifacts tab**
 
-Artifact sets to seed at the start of a run. Each entry has a name, a type from the ones the preset's scenario knows, a payload, a cell or node, a lifespan and the type's own parameters. A saved set is a folder with one JSON file under `launcher_content/artifacts/` in the working directory. "Use in launch" points `env.init_artifacts_path` at it.
+Artifact sets to seed at the start of a run. Each entry has a name, a type from the ones the preset's scenario knows, a payload, a cell or node, a lifespan and the type's own parameters. "In the configuration" shows the folder the current configuration names through `env.init_artifacts_path`, or through a scenario option of that name; the editor opens it, and "Save" writes it back in place when it lies under the working directory and holds at most one JSON file. The list below it shows the sets found in the folders that matter: where the setting reads them, beside the preset, and the launcher's own `launcher_content/artifacts/`. "Save as…" asks for a name and a folder, suggests those folders with the one the setting reads from first, and shows the value "Use in launch" will set. "Open…" takes the path of any set under the working directory. "Use in launch" points the setting at the set in the editor.
 
 **Personas tab**
 
-Persona lists for the first beings of a run: a persona text, an optional name and a count per entry. A saved list is a JSON file under `launcher_content/personas/`. "Use in launch" points `agent.personas_path` at it. The Launch tab shows an "Edit in Artifacts" or "Edit in Personas" link under a setting that points at one of these files.
+Persona lists for the first beings of a run: a persona text, an optional name and a count per entry. Works like the Artifacts tab: the list named by `agent.personas_path`, or by a scenario option of that name, opens by itself and can be changed in place, and new lists go wherever you choose under the working directory. A relative scenario option is read from the scenario package's folder, as scenarios do, so a list saved there gets a plain relative value; a list elsewhere gets an absolute path, which then lands in the preset if you update it. The Launch tab shows an "Edit in Artifacts", "Edit in Personas" or "Show in Scenario AI" link under a setting whose file the launcher can open.
 
 **Scenario AI tab**
 
-Describe a scenario in plain language. A model writes the instructions text, a persona list, an artifact set and suggested settings, from the preset's settings and the artifact types the scenario knows. Review the result, change the text, ask for changes, then apply: the files go under `launcher_content/`, and the Launch form gets `agent.scenario_specific_instructions`, `agent.personas_path`, `env.init_artifacts_path` and the accepted settings. The model is any name `litellm` routes, `claude-opus-5-5` by default. The key comes from the environment or the working directory's `.env`; a key typed in the page is used for one call and never stored.
+"Current instructions" shows the file that `agent.scenario_specific_instructions` names, as it is on disk; TerraLingua renders it with Jinja at run time. Beside it, describe a scenario in plain language. A model writes the instructions text, a persona list, an artifact set and suggested settings, from the preset's settings, the current instructions and the artifact types the scenario knows. Review the result, change the text, ask for changes, then apply: the files get the chosen name in the chosen folder (the scenario's folder is suggested first, then the preset's, then `launcher_content/`, which keeps one subfolder per kind), and the Launch form gets the instructions, personas and artifacts settings and the accepted settings. The model is any name `litellm` routes, `claude-opus-5-5` by default. The key comes from the environment or the working directory's `.env`; a key typed in the page is used for one call and never stored.
 
 **Console tab**
 
