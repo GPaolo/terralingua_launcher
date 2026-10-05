@@ -40,6 +40,12 @@ function newContentState() {
   };
 }
 
+/* The instructions editor on the Scenario AI tab. `savedText` is the text as on disk, "" for a new
+   text, null while no text is shown; `writable` is false for a file outside the working directory. */
+function newInstructionsState() {
+  return { path: null, name: null, savedText: null, saved: false, writable: false, busy: false, followed: null, loadSeq: 0 };
+}
+
 const state = {
   settings: null,
   presets: [],
@@ -76,7 +82,9 @@ const state = {
   tab: "launch",
   toastTimer: null,
   content: { artifacts: newContentState(), personas: newContentState() },
+  instructions: newInstructionsState(),
   sources: {},
+  extra: { paths: [], info: {}, path: null, text: "", savedText: null, busy: false, loadSeq: 0 },
   artifactTypes: { key: null, list: null, loading: false, cache: {}, seq: 0 },
   design: null,
   designBusy: false,
@@ -1091,6 +1099,7 @@ function applyEvaluationResult(result, seq) {
     };
     renderDerived();
     if (isPlainObject(result.content)) state.sources = result.content;
+    if (Array.isArray(result.extra_files)) applyExtraInfo(result.extra_files);
   }
   renderDiagnostics(result !== null);
   $("#statesNote").hidden = state.evalValid || !state.evaluation;
@@ -1200,6 +1209,13 @@ function unsavedWork() {
     const where = state.content[kind].path ? ` to ${state.content[kind].path}` : "";
     items.push(`The ${CONTENT_KINDS[kind].tab} editor has unsaved changes${where}. The run reads the files as they are on disk, without them.`);
   }
+  if (instructionsDirty()) {
+    const where = state.instructions.path ? ` to ${state.instructions.path}` : "";
+    items.push(`The instructions text has unsaved changes${where}. The run reads the file as it is on disk, without them.`);
+  }
+  if (extraDirty()) {
+    items.push(`The Files editor has unsaved changes to ${state.extra.path}. The run reads the file as it is on disk, without them.`);
+  }
   return items;
 }
 
@@ -1246,17 +1262,18 @@ function showNewProc(proc) {
 /* One button per tool the preset's scenario ships (viewer, anthropologist).
    The interpreter must be usable; the configuration's validity does not matter. */
 function renderToolButtons() {
-  const holder = $("#toolButtons");
   const tools = state.schema?.scenario?.tools || {};
   const names = Object.keys(tools).filter((name) => tools[name]);
-  holder.textContent = "";
-  holder.hidden = !names.length;
-  for (const name of names) {
-    holder.append(el("button", {
-      type: "button",
-      disabled: !state.settings?.python_ok,
-      onclick: (event) => startTool(name, event.currentTarget),
-    }, `Open ${name}`));
+  for (const holder of [$("#toolButtons"), $("#consoleToolButtons")]) {
+    holder.textContent = "";
+    holder.hidden = !names.length;
+    for (const name of names) {
+      holder.append(el("button", {
+        type: "button",
+        disabled: !state.settings?.python_ok,
+        onclick: (event) => startTool(name, event.currentTarget),
+      }, `Open ${name}`));
+    }
   }
 }
 
@@ -2170,9 +2187,34 @@ function suggestedFolders(kind) {
   if (source?.setting.startsWith(SCENARIO_PREFIX)) addFolder(folders, source.base, "where the scenario reads them");
   else addFolder(folders, presetFolder, "beside the preset");
   if (source?.relative) addFolder(folders, dirname(source.relative), "beside the file in the configuration");
-  if (state.content[kind]?.path) addFolder(folders, dirname(state.content[kind].path), "the folder of the file in the editor");
+  if (editorState(kind).path) addFolder(folders, dirname(editorState(kind).path), "the folder of the file in the editor");
   addFolder(folders, `launcher_content/${kind}`, "the launcher's own folder");
   return folders;
+}
+
+/* The three editors share the save and open dialogs. */
+function editorState(kind) {
+  return kind === "instructions" ? state.instructions : state.content[kind];
+}
+
+function editorData(kind) {
+  return kind === "instructions" ? $("#currentInstructionsText").value : serializeContent(kind);
+}
+
+function kindLabel(kind) {
+  return kind === "instructions" ? "instructions text" : CONTENT_KINDS[kind].one;
+}
+
+function afterSaved(kind, result, data) {
+  if (kind !== "instructions") {
+    afterContentSaved(kind, result, data);
+    loadContentList(kind);
+    return;
+  }
+  Object.assign(state.instructions, { path: result.path, name: result.name, savedText: data, saved: true, writable: true });
+  toast(`Saved ${result.path}.`);
+  scheduleEvaluate();
+  refreshInstructionsPanel();
 }
 
 /* Folders for the files a design writes: the scenario's folder, the preset's folder, the launcher's own. */
@@ -2215,6 +2257,51 @@ function bindRelativeCompletion(input, list, options) {
   }, 150));
 }
 
+/* A clickable list of the folders and files where the typed path points, under the working directory.
+   A folder descends into it, a file fills the input. Returns the function that refreshes the list. */
+function bindPathPicker(input, holder, options) {
+  let seq = 0;
+  const choose = (value, refresh) => {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (refresh) show();
+  };
+  async function show() {
+    const workdir = state.settings?.workdir;
+    if (!workdir) return;
+    const opts = typeof options === "function" ? options() : options;
+    const typed = input.value.trim().replace(/^(\.\/)+/, "");
+    const query = new URLSearchParams({ prefix: typed.startsWith("/") ? typed : `${workdir}/${typed}`, dirs_only: String(!!opts.dirsOnly) });
+    if (opts.suffix) query.set("suffix", opts.suffix);
+    const mine = ++seq;
+    let paths;
+    try {
+      paths = (await GET(`/api/fs?${query}`)).paths;
+    } catch (error) {
+      showError(error.message);
+      return;
+    }
+    if (mine !== seq) return;
+    holder.textContent = "";
+    const listed = typed.includes("/") ? typed.slice(0, typed.lastIndexOf("/")) : "";
+    if (listed) {
+      const parent = dirname(listed);
+      holder.append(el("button", { type: "button", class: "folder up", onclick: () => choose(parent ? `${parent}/` : "", true) }, ".."));
+    }
+    for (const path of paths) {
+      const rel = path.startsWith(`${workdir}/`) ? path.slice(workdir.length + 1) : path;
+      const isFolder = rel.endsWith("/");
+      const name = rel.slice(rel.lastIndexOf("/", rel.length - 2) + 1);
+      holder.append(el("button", { type: "button", class: isFolder ? "folder" : "file", title: rel, onclick: () => choose(rel, isFolder) }, name));
+    }
+    if (!paths.length) holder.append(el("p", { class: "hint" }, opts.dirsOnly ? "No folders here." : "Nothing here."));
+  }
+  input.addEventListener("input", debounce(show, 150));
+  return show;
+}
+
+const pickers = {};
+
 async function fileExists(kind, path) {
   try {
     await GET(`/api/files/${kind}?path=${encodeURIComponent(path)}`);
@@ -2226,11 +2313,11 @@ async function fileExists(kind, path) {
 }
 
 function openSaveDialog(kind) {
-  const ct = state.content[kind];
+  const ct = editorState(kind);
   dialogKind = kind;
   const folders = suggestedFolders(kind);
-  $("#contentSaveTitle").textContent = `Save the ${CONTENT_KINDS[kind].one} as`;
-  $("#contentSaveName").value = ct.path ? (ct.name || "").replace(/\.json$/, "") : "";
+  $("#contentSaveTitle").textContent = `Save the ${kindLabel(kind)} as`;
+  $("#contentSaveName").value = ct.path ? (ct.name || "").replace(/\.(json|md)$/, "") : "";
   $("#contentSaveFolder").value = folders[0].path;
   folderChips($("#contentSaveChips"), folders, (path) => {
     $("#contentSaveFolder").value = path;
@@ -2239,6 +2326,7 @@ function openSaveDialog(kind) {
   $("#contentSaveError").hidden = true;
   refreshSaveDialog();
   $("#contentSaveDialog").showModal();
+  pickers.save();
 }
 
 function saveDialogTarget() {
@@ -2272,12 +2360,12 @@ async function submitSaveDialog(event) {
   const button = $("#contentSaveConfirm");
   button.disabled = true;
   try {
-    const replacing = path !== state.content[kind].path && await fileExists(kind, path);
+    const replacing = path !== editorState(kind).path && await fileExists(kind, path);
     if (replacing && !window.confirm(`${path} exists. Replace it?`)) return;
-    const data = serializeContent(kind);
-    afterContentSaved(kind, await api("PUT", `/api/files/${kind}`, { path, data }), data);
+    const data = editorData(kind);
+    const result = await api("PUT", `/api/files/${kind}`, { path, data });
     $("#contentSaveDialog").close();
-    await loadContentList(kind);
+    afterSaved(kind, result, data);
   } catch (failure) {
     errorNode.textContent = failure.message;
     errorNode.hidden = false;
@@ -2288,10 +2376,11 @@ async function submitSaveDialog(event) {
 
 function openOpenDialog(kind) {
   dialogKind = kind;
-  $("#contentOpenTitle").textContent = `Open a ${CONTENT_KINDS[kind].one}`;
+  $("#contentOpenTitle").textContent = kind === "instructions" ? "Open an instructions text" : `Open a ${kindLabel(kind)}`;
   $("#contentOpenPath").value = "";
   $("#contentOpenError").hidden = true;
   $("#contentOpenDialog").showModal();
+  pickers.open();
 }
 
 async function submitOpenDialog(event) {
@@ -2304,11 +2393,18 @@ async function submitOpenDialog(event) {
     errorNode.hidden = false;
     return;
   }
-  if (!confirmDiscard(kind, `Load ${path}`)) return;
+  const allowed = kind === "instructions" ? confirmDiscardInstructions(`Load ${path}`) : confirmDiscard(kind, `Load ${path}`);
+  if (!allowed) return;
   try {
-    showContentItem(kind, await GET(`/api/files/${kind}?path=${encodeURIComponent(path)}`));
+    const result = await GET(`/api/files/${kind}?path=${encodeURIComponent(path)}`);
     $("#contentOpenDialog").close();
-    loadContentList(kind);
+    if (kind === "instructions") {
+      showInstructions(result);
+      $("#currentInstructionsText").focus();
+    } else {
+      showContentItem(kind, result);
+      loadContentList(kind);
+    }
   } catch (failure) {
     errorNode.textContent = failure.message;
     errorNode.hidden = false;
@@ -2409,8 +2505,199 @@ function followSources() {
       renderEntries(kind);
     }
   }
-  renderCurrentInstructions();
+  followInstructions();
   renderDesignFolders();
+}
+
+/* ---------------- extra files: registered JSON files, edited as raw JSON ---------------- */
+
+function extraDirty() {
+  return state.extra.path !== null && state.extra.text !== (state.extra.savedText ?? "");
+}
+
+/* What keeps the current text from being saved: not JSON, or nothing at all. */
+function extraProblem() {
+  const text = state.extra.text.trim();
+  if (!text) return "Type some JSON.";
+  try {
+    JSON.parse(text);
+    return "";
+  } catch (error) {
+    return `Not valid JSON: ${error.message}`;
+  }
+}
+
+function confirmDiscardExtra(action) {
+  if (!extraDirty()) return true;
+  return window.confirm(`${state.extra.path} has unsaved changes. ${action} and lose them?`);
+}
+
+function renderExtraList() {
+  const holder = $("#extraItems");
+  holder.textContent = "";
+  if (!state.extra.paths.length) {
+    holder.append(el("li", { class: "empty" }, "No files registered yet."));
+    return;
+  }
+  for (const path of state.extra.paths) {
+    const info = state.extra.info[path];
+    const badge = !info ? null : !info.exists ? "missing" : info.references.length ? "in the configuration" : null;
+    holder.append(el("li", { class: "ct-item", "data-path": path, "aria-current": path === state.extra.path ? "true" : null },
+      el("button", { type: "button", class: "ct-item-name", title: path, onclick: () => loadExtraFile(path) }, path),
+      el("span", { class: "badge" }, badge),
+      el("button", { type: "button", class: "danger-ghost mini", "aria-label": `Remove ${path} from the list`, onclick: () => removeExtraFile(path) }, "Remove")));
+  }
+}
+
+/* The settings whose value points at the file in the editor, from the last valid evaluation. */
+function renderExtraReferences() {
+  const holder = $("#extraReferences");
+  holder.textContent = "";
+  if (state.extra.path === null) return;
+  const info = state.extra.info[state.extra.path];
+  if (!info) {
+    holder.append("Which setting names this file is known once the configuration is valid.");
+    return;
+  }
+  if (!info.references.length) {
+    holder.append("No setting in the current configuration names this file.");
+    return;
+  }
+  holder.append("Named by ");
+  info.references.forEach((setting, index) => {
+    if (index) holder.append(" and ");
+    holder.append(el("code", {}, setting));
+  });
+  holder.append(".");
+}
+
+function refreshExtraPane() {
+  const ex = state.extra;
+  const pane = $("#paneFiles");
+  const editing = ex.path !== null;
+  const problem = editing ? extraProblem() : "";
+  const dirty = extraDirty();
+  $(".ct-title-name", pane).textContent = ex.path || "No file selected";
+  $(".ct-unsaved", pane).hidden = !dirty;
+  $("#extraText").hidden = !editing;
+  $("#extraEmpty").hidden = editing;
+  let reason = "";
+  if (ex.busy) reason = "Working…";
+  else if (editing && problem) reason = problem;
+  else if (editing && ex.savedText === null) reason = "The file does not exist yet. Save creates it.";
+  else if (editing && !dirty) reason = "Nothing changed since the last save.";
+  $("#extraHint").textContent = reason;
+  $("#extraSave").disabled = ex.busy || !editing || !!problem || (!dirty && ex.savedText !== null);
+  renderExtraReferences();
+  for (const node of $$("[data-path]", $("#extraItems"))) {
+    setAttr(node, "aria-current", node.dataset.path === ex.path ? "true" : null);
+  }
+  const editor = $(".content-editor", pane);
+  editor.classList.toggle("busy", ex.busy);
+  editor.setAttribute("aria-busy", String(ex.busy));
+}
+
+function setExtraBusy(busy) {
+  state.extra.busy = busy;
+  refreshExtraPane();
+}
+
+/* Shows a file in the editor; a missing one starts as an empty list to fill in. */
+async function loadExtraFile(path) {
+  if (path !== state.extra.path && !confirmDiscardExtra(`Load ${path}`)) return;
+  const ex = state.extra;
+  const seq = ++ex.loadSeq;
+  setExtraBusy(true);
+  try {
+    const result = await GET(`/api/file?path=${encodeURIComponent(path)}`);
+    if (seq !== ex.loadSeq) return;
+    ex.path = result.path;
+    ex.text = formatJson(result.data);
+    ex.savedText = ex.text;
+  } catch (error) {
+    if (seq !== ex.loadSeq) return;
+    if (error.status !== 404) {
+      showError(error.message);
+      return;
+    }
+    Object.assign(ex, { path, text: "[]", savedText: null });
+  } finally {
+    if (seq === ex.loadSeq) {
+      $("#extraText").value = ex.text;
+      renderExtraList();
+      setExtraBusy(false);
+    }
+  }
+}
+
+async function saveExtraFile() {
+  const ex = state.extra;
+  if (ex.path === null || extraProblem()) return;
+  const data = JSON.parse(ex.text.trim());
+  setExtraBusy(true);
+  try {
+    const result = await api("PUT", "/api/file", { path: ex.path, data });
+    ex.text = formatJson(data);
+    ex.savedText = ex.text;
+    $("#extraText").value = ex.text;
+    toast(`Saved ${result.path}.`);
+    scheduleEvaluate();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setExtraBusy(false);
+  }
+}
+
+function openExtraAddDialog() {
+  $("#extraAddPath").value = "";
+  $("#extraAddError").hidden = true;
+  $("#extraAddDialog").showModal();
+  pickers.extra();
+}
+
+async function submitExtraAdd(event) {
+  event.preventDefault();
+  const errorNode = $("#extraAddError");
+  const typed = normalizePath($("#extraAddPath").value);
+  if (!typed) {
+    errorNode.textContent = "Type the path of a JSON file inside the working directory.";
+    errorNode.hidden = false;
+    return;
+  }
+  try {
+    state.extra.paths = (await POST("/api/extra_files", { path: typed })).extra_files;
+    $("#extraAddDialog").close();
+    renderExtraList();
+    scheduleEvaluate();
+    loadExtraFile(typed);
+  } catch (failure) {
+    errorNode.textContent = failure.message;
+    errorNode.hidden = false;
+  }
+}
+
+async function removeExtraFile(path) {
+  if (path === state.extra.path && !confirmDiscardExtra(`Remove ${path} from the list`)) return;
+  try {
+    state.extra.paths = (await api("DELETE", `/api/extra_files?path=${encodeURIComponent(path)}`)).extra_files;
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
+  if (path === state.extra.path) Object.assign(state.extra, { path: null, text: "", savedText: null });
+  delete state.extra.info[path];
+  toast(`Removed ${path} from the list. The file stays on disk.`);
+  renderExtraList();
+  refreshExtraPane();
+}
+
+/* A valid evaluation says which files exist and which settings name them. */
+function applyExtraInfo(entries) {
+  state.extra.info = Object.fromEntries(entries.map((entry) => [entry.path, entry]));
+  state.extra.paths = entries.map((entry) => entry.path);
+  renderExtraList();
+  refreshExtraPane();
 }
 
 /* ---------------- scenario AI: a model writes the scenario content ---------------- */
@@ -2421,40 +2708,155 @@ function listOf(value) {
   return Array.isArray(value) ? value : [];
 }
 
-/* The instructions text the configuration gives every being, as the server read it. */
-function renderCurrentInstructions() {
+/* ---- the current instructions: the file the configuration names, editable ---- */
+
+function instructionsDirty() {
+  const it = state.instructions;
+  return it.savedText !== null && it.writable && $("#currentInstructionsText").value !== it.savedText;
+}
+
+function confirmDiscardInstructions(action) {
+  if (!instructionsDirty()) return true;
+  return window.confirm(`The instructions text has unsaved changes. ${action} and lose them?`);
+}
+
+/* Shows a file ({name, path, data}) in the editor as the saved state. */
+function showInstructions(result) {
+  Object.assign(state.instructions, { path: result.path, name: result.name, savedText: result.data, saved: true, writable: result.writable !== false });
+  $("#currentInstructionsText").value = result.data;
+  refreshInstructionsPanel();
+}
+
+async function loadInstructions(path, quiet = false) {
+  if (!quiet && !confirmDiscardInstructions(`Load ${path}`)) return;
+  const it = state.instructions;
+  const seq = ++it.loadSeq;
+  it.busy = true;
+  refreshInstructionsPanel();
+  try {
+    const result = await GET(`/api/files/instructions?path=${encodeURIComponent(path)}`);
+    if (seq !== it.loadSeq) return;
+    showInstructions(result);
+    if (!quiet) $("#currentInstructionsText").focus();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    if (seq === it.loadSeq) {
+      it.busy = false;
+      refreshInstructionsPanel();
+    }
+  }
+}
+
+function newInstructions() {
+  if (!confirmDiscardInstructions("Start a new text")) return;
+  Object.assign(state.instructions, { path: null, name: null, savedText: "", saved: false, writable: true });
+  $("#currentInstructionsText").value = "";
+  refreshInstructionsPanel();
+  $("#currentInstructionsText").focus();
+}
+
+/* An empty editor for the file the configuration names but that does not exist yet. */
+function startInstructionsAt(path) {
+  if (!confirmDiscardInstructions(`Start ${path}`)) return;
+  const name = path.split("/").pop().replace(/\.[^.]+$/, "");
+  Object.assign(state.instructions, { path, name, savedText: "", saved: false, writable: true });
+  $("#currentInstructionsText").value = "";
+  refreshInstructionsPanel();
+  $("#currentInstructionsText").focus();
+}
+
+async function saveInstructions() {
+  const it = state.instructions;
+  if (!it.path || !it.writable) return;
+  const text = $("#currentInstructionsText").value;
+  it.busy = true;
+  refreshInstructionsPanel();
+  try {
+    afterSaved("instructions", await api("PUT", "/api/files/instructions", { path: it.path, data: text }), text);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    it.busy = false;
+    refreshInstructionsPanel();
+  }
+}
+
+function useInstructionsInLaunch() {
+  const it = state.instructions;
+  const setting = contentSetting("instructions");
+  if (!it.path || !it.saved || !(setting in state.fields)) return;
+  const value = settingValueFor("instructions", it.path);
+  setOverride(setting, value);
+  toast(`Set ${setting} to ${value}`);
+  refreshInstructionsPanel();
+}
+
+function instructionsInUse() {
+  const it = state.instructions;
   const source = state.sources.instructions;
+  return !!it.path && it.saved && !!source && source.relative === it.path;
+}
+
+/* The editor follows the file the configuration names, unless it holds unsaved changes. */
+function followInstructions() {
+  const it = state.instructions;
+  const source = state.sources.instructions || null;
+  const key = sourceKey(source);
+  if (key !== it.followed && !instructionsDirty()) {
+    it.followed = key;
+    if (source?.exists && source.inside) {
+      if (it.path !== source.relative) loadInstructions(source.relative, true);
+    } else if (source?.exists && typeof source.text === "string") {
+      // outside the working directory: shown as the server read it, not editable
+      Object.assign(it, { path: null, name: null, savedText: source.text, saved: false, writable: false });
+      $("#currentInstructionsText").value = source.text;
+    } else if (it.savedText !== null) {
+      Object.assign(it, { path: null, name: null, savedText: null, saved: false, writable: false });
+      $("#currentInstructionsText").value = "";
+    }
+  }
+  refreshInstructionsPanel();
+}
+
+function refreshInstructionsPanel() {
+  const it = state.instructions;
+  const source = state.sources.instructions;
+  const area = $("#currentInstructionsText");
   const line = $("#currentInstructionsSource");
-  const text = $("#currentInstructionsText");
+  const editing = it.savedText !== null;
+  const dirty = instructionsDirty();
+  const inUse = instructionsInUse();
   line.textContent = "";
-  text.hidden = true;
-  text.textContent = "";
   if (!state.schema) {
     line.textContent = "Waiting for the settings to load.";
-    return;
-  }
-  if (!source) {
+  } else if (!source) {
     line.textContent = "Known once the configuration is valid.";
-    return;
+  } else {
+    const setting = el("code", {}, source.setting);
+    const where = source.relative || source.path;
+    if (!source.value || source.builtin === "none") line.append("No instructions text: ", setting, source.value ? ' is "none". ' : " is not set. ", 'Use "New" to write one.');
+    else if (source.builtin) line.append(`TerraLingua's built-in text "${source.builtin}", named by `, setting, '. The launcher cannot show it; use "New" to write your own.');
+    else if (!source.exists) line.append(setting, ` points at ${where}, which does not exist. `, source.inside ? el("button", { type: "button", class: "mini", onclick: () => startInstructionsAt(where) }, "Create it here") : "");
+    else if (!source.inside) line.append(`From ${where}, named by `, setting, ". Outside the working directory, so it cannot be changed here.");
+    else line.append(`From ${where}, named by `, setting, ".");
   }
-  const setting = el("code", {}, source.setting);
-  if (!source.value || source.builtin === "none") {
-    line.append("No instructions text: ", setting, source.value ? ' is "none".' : " is not set.");
-    return;
-  }
-  if (source.builtin) {
-    line.append(`TerraLingua's built-in text "${source.builtin}", named by `, setting, ". The launcher cannot show it.");
-    return;
-  }
-  const where = source.relative || source.path;
-  if (!source.exists) {
-    line.append(setting, ` points at ${where}, which does not exist.`);
-    return;
-  }
-  line.append(`From ${where}, named by `, setting, source.truncated ? ". The first part:" : ":");
-  text.hidden = false;
-  text.textContent = source.text || "(The file is empty.)";
-  text.classList.toggle("empty-text", !source.text);
+  area.hidden = !editing;
+  area.disabled = it.busy || (editing && !it.writable);
+  let what = "";
+  if (editing && !it.writable) what = "A copy can be saved under the working directory with \"Save as…\".";
+  else if (editing && !it.path) what = `A new text${dirty ? ", unsaved" : ""}. Use "Save as…" to write it to a file.`;
+  else if (editing) what = `${it.path}${inUse ? " (in the configuration)" : ""}${dirty ? " (unsaved)" : it.saved ? "" : " (not written yet)"}`;
+  $("#instructionsHint").textContent = what;
+  $("#instructionsSave").disabled = it.busy || !editing || !it.path || !it.writable || !dirty;
+  $("#instructionsSaveAs").disabled = it.busy || !editing;
+  $("#instructionsOpen").disabled = it.busy;
+  $("#instructionsNew").disabled = it.busy;
+  const use = $("#instructionsUse");
+  use.disabled = it.busy || !it.path || !it.saved || inUse || !contentSettingKnown("instructions");
+  if (!it.path || !it.saved) use.title = "Save the text to a file first.";
+  else if (inUse) use.title = "The launch form uses this file already.";
+  else use.title = `Set ${contentSetting("instructions")} to ${settingValueFor("instructions", it.path)}`;
 }
 
 function defaultDesignName(description) {
@@ -2851,6 +3253,10 @@ function switchTab(name) {
     pollLog();
   }
   if (name in CONTENT_KINDS) openContentTab(name);
+  if (name === "files") {
+    renderExtraList();
+    refreshExtraPane();
+  }
   if (name === "design") renderDesignFolders();
 }
 
@@ -2953,10 +3359,27 @@ function bindEvents() {
   $("#contentSaveCancel").addEventListener("click", () => $("#contentSaveDialog").close());
   $("#contentSaveName").addEventListener("input", refreshSaveDialog);
   $("#contentSaveFolder").addEventListener("input", refreshSaveDialog);
-  bindRelativeCompletion($("#contentSaveFolder"), $("#contentFolderList"), { dirsOnly: true });
+  pickers.save = bindPathPicker($("#contentSaveFolder"), $("#contentSavePicker"), { dirsOnly: true });
   $("#contentOpenForm").addEventListener("submit", submitOpenDialog);
   $("#contentOpenCancel").addEventListener("click", () => $("#contentOpenDialog").close());
-  bindRelativeCompletion($("#contentOpenPath"), $("#contentOpenList"), () => (dialogKind === "artifacts" ? { dirsOnly: true } : { suffix: ".json" }));
+  pickers.open = bindPathPicker($("#contentOpenPath"), $("#contentOpenPicker"), () => (
+    dialogKind === "artifacts" ? { dirsOnly: true } : { suffix: dialogKind === "instructions" ? ".md" : ".json" }
+  ));
+  $("#currentInstructionsText").addEventListener("input", refreshInstructionsPanel);
+  $("#instructionsNew").addEventListener("click", newInstructions);
+  $("#instructionsOpen").addEventListener("click", () => openOpenDialog("instructions"));
+  $("#instructionsSave").addEventListener("click", saveInstructions);
+  $("#instructionsSaveAs").addEventListener("click", () => openSaveDialog("instructions"));
+  $("#instructionsUse").addEventListener("click", useInstructionsInLaunch);
+  $("#extraAddBtn").addEventListener("click", openExtraAddDialog);
+  $("#extraAddForm").addEventListener("submit", submitExtraAdd);
+  $("#extraAddCancel").addEventListener("click", () => $("#extraAddDialog").close());
+  pickers.extra = bindPathPicker($("#extraAddPath"), $("#extraAddPicker"), { suffix: ".json" });
+  $("#extraSave").addEventListener("click", saveExtraFile);
+  $("#extraText").addEventListener("input", (event) => {
+    state.extra.text = event.target.value;
+    refreshExtraPane();
+  });
   $("#designFolder").addEventListener("input", onDesignFolderInput);
   bindRelativeCompletion($("#designFolder"), $("#designFolderList"), { dirsOnly: true });
   window.addEventListener("pagehide", persistOnHide);
@@ -2968,13 +3391,16 @@ async function boot() {
     renderEntries(kind);
     renderContentSource(kind);
   }
-  renderCurrentInstructions();
+  refreshInstructionsPanel();
   try {
     state.settings = await GET("/api/settings");
   } catch (error) {
     showError(error.message);
   }
   renderHeader();
+  state.extra.paths = Array.isArray(state.settings?.extra_files) ? state.settings.extra_files : [];
+  renderExtraList();
+  refreshExtraPane();
   const last = state.settings?.last || {};
   state.overrides = isPlainObject(last.overrides) ? last.overrides : {};
   state.resume = !!last.resume;

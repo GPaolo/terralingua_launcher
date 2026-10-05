@@ -243,6 +243,48 @@ def write_path(workdir: Path, kind: str, value: str, data) -> dict:
     return {"name": path.name if spec.folder else path.stem, "path": relative(workdir, path)}
 
 
+# ---------- extra files: any JSON the user registers, whatever it holds ----------
+
+
+def check_json_path(workdir: Path, value: str) -> str:
+    """A registrable path, relative to the working directory."""
+    path = inside(workdir, value)
+    if path.suffix != ".json":
+        raise ContentError(f"{value} is not a JSON file")
+    if path.is_dir():
+        raise ContentError(f"{value} is a folder")
+    return relative(workdir, path)
+
+
+def read_json(workdir: Path, value: str) -> dict:
+    """A JSON file under the working directory, whatever shape it holds."""
+    rel = check_json_path(workdir, value)
+    path = workdir / rel
+    if not path.is_file():
+        raise FileNotFoundError(f"no file {value}")
+    return {"name": path.stem, "path": rel, "data": json.loads(path.read_text()), "writable": True}
+
+
+def write_json(workdir: Path, value: str, data) -> dict:
+    """Write any JSON value to a file under the working directory, creating it if need be."""
+    rel = check_json_path(workdir, value)
+    path = workdir / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return {"name": path.stem, "path": rel}
+
+
+def referencing(workdir: Path, values: dict, scenario_dir: Path | None, value: str) -> list[str]:
+    """The settings of a configuration whose value points at this file."""
+    path = inside(workdir, value)
+    return sorted(
+        setting
+        for setting, text in values.items()
+        if isinstance(text, str) and text.strip()
+        and resolve(workdir, setting, text, scenario_dir).resolve() == path
+    )
+
+
 # ---------- the files a configuration names ----------
 
 

@@ -360,6 +360,49 @@ def test_evaluate_names_the_content_files_of_a_preset(workdir, state_path):
         assert sub_config["env"] == {"init_artifacts_path": "seeds", "grid_size": 11}
 
 
+def test_extra_files_are_registered_edited_and_remembered(workdir, state_path):
+    (workdir / "notes").mkdir()
+    with TestClient(server.create_app(workdir, sys.executable, state_path)) as client:
+        assert client.get("/api/settings").json()["extra_files"] == []
+        assert client.post("/api/extra_files", json={"path": "notes/centers.json"}).json()["extra_files"] == ["notes/centers.json"]
+        # registering again, even by its absolute path, keeps one entry; bad paths are refused
+        again = client.post("/api/extra_files", json={"path": str(workdir / "notes" / "centers.json")})
+        assert again.json()["extra_files"] == ["notes/centers.json"]
+        assert client.post("/api/extra_files", json={"path": "../outside.json"}).status_code == 400
+        assert client.post("/api/extra_files", json={"path": "notes/plain.txt"}).status_code == 400
+        assert client.post("/api/extra_files", json={}).status_code == 400
+        # the file need not exist: reading says 404, the first save creates it
+        assert client.get("/api/file", params={"path": "notes/centers.json"}).status_code == 404
+        saved = client.put("/api/file", json={"path": "notes/centers.json", "data": [{"pose": [1, 1]}]})
+        assert saved.status_code == 200 and saved.json()["path"] == "notes/centers.json"
+        assert json.loads((workdir / "notes" / "centers.json").read_text()) == [{"pose": [1, 1]}]
+        assert client.get("/api/file", params={"path": "notes/centers.json"}).json()["data"] == [{"pose": [1, 1]}]
+        assert client.put("/api/file", json={"path": "notes/centers.json"}).status_code == 400
+    # the registration survives a restart; removing forgets the path but keeps the file
+    with TestClient(server.create_app(workdir, sys.executable, state_path)) as client:
+        assert client.get("/api/settings").json()["extra_files"] == ["notes/centers.json"]
+        assert client.delete("/api/extra_files", params={"path": "notes/centers.json"}).json()["extra_files"] == []
+        assert client.delete("/api/extra_files", params={"path": "notes/centers.json"}).status_code == 404
+        assert (workdir / "notes" / "centers.json").is_file()
+    assert json.loads(state_path.read_text())["extra_files"] == []
+
+
+def test_evaluate_reports_the_extra_files_and_their_references(workdir, state_path):
+    (workdir / "personas.json").write_text(json.dumps([{"persona": "You heal."}]))
+    config = {"agent": {"personas_path": "personas.json"}}
+    (workdir / "refs.preset.yaml").write_text(yaml.safe_dump({"name": "refs", "config": config}))
+    with TestClient(server.create_app(workdir, sys.executable, state_path)) as client:
+        client.post("/api/extra_files", json={"path": "personas.json"})
+        client.post("/api/extra_files", json={"path": "unrelated.json"})
+        data = client.post("/api/evaluate", json={"preset": "refs", "overrides": {}}).json()
+        assert data["valid"], data["diagnostics"]
+        files = {entry["path"]: entry for entry in data["extra_files"]}
+        assert files["personas.json"]["exists"] and files["personas.json"]["references"] == ["agent.personas_path"]
+        assert not files["unrelated.json"]["exists"] and files["unrelated.json"]["references"] == []
+        broken = client.post("/api/evaluate", json={"preset": "refs", "overrides": {"run.max_ts": "abc"}}).json()
+        assert not broken["valid"] and "extra_files" not in broken
+
+
 def test_module_dir_comes_from_the_target(tmp_path):
     assert target.module_dir(sys.executable, tmp_path, "json") == str(Path(json.__file__).parent)
     assert target.module_dir(sys.executable, tmp_path, "no_such_module_at_all") is None

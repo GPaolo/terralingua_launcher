@@ -86,6 +86,7 @@ def create_app(
     app.state.env = environment(app.state.workdir)
     app.state.last = state.get("last") or {}
     app.state.tool_ports = tool_ports_of(state.get("tool_ports"))
+    app.state.extra_files = [p for p in (state.get("extra_files") or []) if isinstance(p, str)]
     app.state.schema_cache = {}  # (python, workdir, preset) -> description
     app.state.module_cache = {}  # (python, workdir, module) -> the scenario package's folder
     app.state.procs = ProcRegistry()
@@ -102,6 +103,7 @@ def create_app(
             "workdir": str(app.state.workdir),
             "python": app.state.python,
             "tool_ports": app.state.tool_ports,
+            "extra_files": app.state.extra_files,
             "last": app.state.last,
         })
 
@@ -177,6 +179,21 @@ def create_app(
         fields = all_fields(schema(preset))
         return content.sources(app.state.workdir, fields, flat_values(evaluated, fields), scenario_dir(preset))
 
+    def extra_files_of(preset: str | None, evaluated: dict) -> list[dict]:
+        """The registered extra files: whether each exists and which settings name it."""
+        values = flat_values(evaluated, all_fields(schema(preset)))
+        folder = scenario_dir(preset)
+        out = []
+        for path in app.state.extra_files:
+            entry = {"path": path, "exists": False, "references": []}
+            try:
+                entry["exists"] = content.inside(app.state.workdir, path).is_file()
+                entry["references"] = content.referencing(app.state.workdir, values, folder, path)
+            except content.ContentError:
+                pass  # the path left the working directory, say when the workdir changed
+            out.append(entry)
+        return out
+
     def overrides_of(body: dict) -> dict:
         overrides = body.get("overrides")
         if overrides is None:
@@ -199,6 +216,7 @@ def create_app(
             "launcher_version": target.launcher_version(),
             "keys": {k: bool(app.state.env.get(k)) for k in KEY_VARS},
             "tool_ports": app.state.tool_ports,
+            "extra_files": app.state.extra_files,
             "last": app.state.last,
         }
 
@@ -281,11 +299,12 @@ def create_app(
 
     @app.post("/api/evaluate")
     def evaluate(body: dict):
-        """TerraLingua's evaluation, plus `content`: the files a valid configuration names."""
+        """TerraLingua's evaluation, plus `content` and `extra_files`: the files it names."""
         preset = body.get("preset") or None
         result = ask(target.evaluate, preset, command.normalized(overrides_of(body)))
         if result.get("valid"):
             result["content"] = content_sources(preset, result)
+            result["extra_files"] = extra_files_of(preset, result)
         return result
 
     @app.post("/api/preview")
@@ -381,6 +400,38 @@ def create_app(
         if not isinstance(body.get("path"), str) or "data" not in body:
             raise HTTPException(400, "the body needs 'path' and 'data' fields")
         return content_call(content.write_path, kind, body["path"], body["data"])
+
+    @app.post("/api/extra_files")
+    def add_extra_file(body: dict):
+        """Register a JSON file for the Files tab, kept relative to the working directory."""
+        text = str(body.get("path") or "").strip()
+        if not text:
+            raise HTTPException(400, "the body needs a 'path' field")
+        path = content_call(content.check_json_path, text)
+        if path not in app.state.extra_files:
+            app.state.extra_files = [*app.state.extra_files, path]
+            persist()
+        return {"extra_files": app.state.extra_files}
+
+    @app.delete("/api/extra_files")
+    def remove_extra_file(path: str):
+        """Forget a registered file; the file itself stays on disk."""
+        if path not in app.state.extra_files:
+            raise HTTPException(404, f"'{path}' is not registered")
+        app.state.extra_files = [p for p in app.state.extra_files if p != path]
+        persist()
+        return {"extra_files": app.state.extra_files}
+
+    @app.get("/api/file")
+    def read_extra_file(path: str):
+        """A registered file's content: any JSON under the working directory."""
+        return content_call(content.read_json, path)
+
+    @app.put("/api/file")
+    def write_extra_file(body: dict):
+        if not isinstance(body.get("path"), str) or "data" not in body:
+            raise HTTPException(400, "the body needs 'path' and 'data' fields")
+        return content_call(content.write_json, body["path"], body["data"])
 
     @app.get("/api/artifact_types")
     def get_artifact_types(preset: str | None = None):

@@ -31,6 +31,7 @@
       <button class="tab" role="tab" type="button" id="tabLaunch" data-tab="launch" aria-controls="paneLaunch" aria-selected="true">Launch</button>
       <button class="tab" role="tab" type="button" id="tabArtifacts" data-tab="artifacts" aria-controls="paneArtifacts" aria-selected="false">Artifacts</button>
       <button class="tab" role="tab" type="button" id="tabPersonas" data-tab="personas" aria-controls="panePersonas" aria-selected="false">Personas</button>
+      <button class="tab" role="tab" type="button" id="tabFiles" data-tab="files" aria-controls="paneFiles" aria-selected="false">Files</button>
       <button class="tab" role="tab" type="button" id="tabDesign" data-tab="design" aria-controls="paneDesign" aria-selected="false">Scenario AI</button>
       <button class="tab" role="tab" type="button" id="tabConsole" data-tab="console" aria-controls="paneConsole" aria-selected="false">Console <span id="consoleBadge" class="badge"></span></button>
     </nav>
@@ -160,6 +161,33 @@
         </div>
       </section>
 
+      <section id="paneFiles" class="pane" role="tabpanel" aria-labelledby="tabFiles" data-tab="files" hidden>
+        <div class="content-grid">
+          <aside class="panel content-side">
+            <h2>Registered files</h2>
+            <ul id="extraItems" class="ct-items" aria-label="Registered files"></ul>
+            <div class="ct-side-actions">
+              <div class="ct-buttons">
+                <button type="button" id="extraAddBtn">Add file…</button>
+              </div>
+              <p class="hint">Extra JSON files a run reads, such as one a scenario option names. Registering only adds a file to this list, and "Remove" never touches the disk. The launcher saves them as JSON without checking their shape: the run validates them when it starts.</p>
+            </div>
+          </aside>
+          <div class="panel content-editor" aria-busy="false">
+            <div class="ct-head">
+              <h2 class="ct-title" tabindex="-1"><span class="ct-title-name">No file selected</span> <span class="ct-unsaved" hidden>(unsaved)</span></h2>
+              <div class="ct-actions">
+                <button type="button" id="extraSave" class="primary" disabled>Save</button>
+              </div>
+            </div>
+            <p id="extraReferences" class="ct-info hint"></p>
+            <p id="extraHint" class="ct-hint hint" aria-live="polite"></p>
+            <textarea id="extraText" class="extra-json" spellcheck="false" aria-label="The file's content, as JSON" hidden></textarea>
+            <p id="extraEmpty" class="hint">Register a file on the left and select it to edit it here.</p>
+          </div>
+        </div>
+      </section>
+
       <section id="paneDesign" class="pane" role="tabpanel" aria-labelledby="tabDesign" data-tab="design" hidden>
         <div class="design-grid">
           <form id="designForm" class="panel design-form">
@@ -199,9 +227,19 @@
           </form>
           <div class="design-right">
             <section class="panel">
-              <h2>Current instructions</h2>
+              <div class="panel-head">
+                <h2>Current instructions</h2>
+                <div class="ct-actions">
+                  <button type="button" id="instructionsNew">New</button>
+                  <button type="button" id="instructionsOpen">Open…</button>
+                  <button type="button" id="instructionsSave" class="primary" disabled>Save</button>
+                  <button type="button" id="instructionsSaveAs" disabled>Save as…</button>
+                  <button type="button" id="instructionsUse" disabled>Use in launch</button>
+                </div>
+              </div>
               <p id="currentInstructionsSource" class="hint" aria-live="polite">Waiting for the settings to load.</p>
-              <pre id="currentInstructionsText" class="instructions-text" tabindex="0" aria-label="The current instructions text" hidden></pre>
+              <textarea id="currentInstructionsText" class="instructions-editor" rows="10" spellcheck="false" aria-label="The instructions text" placeholder="The file is empty. Type the instructions here." hidden></textarea>
+              <p id="instructionsHint" class="hint" aria-live="polite"></p>
             </section>
             <div id="designResult" class="design-result" hidden>
               <section class="panel">
@@ -253,6 +291,7 @@
       <section id="paneConsole" class="pane" role="tabpanel" aria-labelledby="tabConsole" data-tab="console" hidden>
         <div class="console-grid">
           <div class="proc-column panel">
+            <div id="consoleToolButtons" class="tool-buttons console-tools" role="group" aria-label="Scenario tools" hidden></div>
             <h2>Processes</h2>
             <ul id="procList" class="proc-list"></ul>
           </div>
@@ -342,9 +381,9 @@
       <label for="contentSaveName">Name</label>
       <input id="contentSaveName" type="text" required spellcheck="false" autocomplete="off">
       <label for="contentSaveFolder">Folder, under the working directory</label>
-      <input id="contentSaveFolder" type="text" list="contentFolderList" spellcheck="false" autocomplete="off">
-      <datalist id="contentFolderList"></datalist>
+      <input id="contentSaveFolder" type="text" spellcheck="false" autocomplete="off">
       <div id="contentSaveChips" class="folder-chips" aria-label="Suggested folders"></div>
+      <div id="contentSavePicker" class="path-picker" aria-label="Folders under the working directory"></div>
       <p id="contentSavePreview" class="hint" aria-live="polite"></p>
       <p id="contentSaveError" class="dialog-error" role="alert" hidden></p>
       <div class="actions">
@@ -354,12 +393,27 @@
     </form>
   </dialog>
 
+  <dialog id="extraAddDialog" aria-labelledby="extraAddTitle">
+    <form method="dialog" id="extraAddForm">
+      <h2 id="extraAddTitle">Add a JSON file</h2>
+      <label for="extraAddPath">File, under the working directory</label>
+      <input id="extraAddPath" type="text" spellcheck="false" autocomplete="off">
+      <div id="extraAddPicker" class="path-picker" aria-label="Folders and JSON files under the working directory"></div>
+      <p class="hint">A path that does not exist yet is fine: the first save creates the file.</p>
+      <p id="extraAddError" class="dialog-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="button" id="extraAddCancel">Cancel</button>
+        <button type="submit" id="extraAddConfirm" class="primary">Add</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="contentOpenDialog" aria-labelledby="contentOpenTitle">
     <form method="dialog" id="contentOpenForm">
       <h2 id="contentOpenTitle">Open</h2>
       <label for="contentOpenPath">File, under the working directory</label>
-      <input id="contentOpenPath" type="text" list="contentOpenList" spellcheck="false" autocomplete="off">
-      <datalist id="contentOpenList"></datalist>
+      <input id="contentOpenPath" type="text" spellcheck="false" autocomplete="off">
+      <div id="contentOpenPicker" class="path-picker" aria-label="Folders and files under the working directory"></div>
       <p id="contentOpenError" class="dialog-error" role="alert" hidden></p>
       <div class="actions">
         <button type="button" id="contentOpenCancel">Cancel</button>

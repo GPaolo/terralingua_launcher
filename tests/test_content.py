@@ -170,6 +170,41 @@ def test_files_are_read_and_written_by_path(tmp_path):
         content.write_path(tmp_path, "personas", "scen/notes.txt", [])
 
 
+def test_extra_json_files_are_read_and_written_by_path(tmp_path):
+    (tmp_path / "scen").mkdir()
+    assert content.write_json(tmp_path, "scen/centers.json", [{"pose": [1, 2]}]) == {"name": "centers", "path": "scen/centers.json"}
+    assert json.loads((tmp_path / "scen" / "centers.json").read_text()) == [{"pose": [1, 2]}]
+    found = content.read_json(tmp_path, "scen/centers.json")
+    assert found == {"name": "centers", "path": "scen/centers.json", "data": [{"pose": [1, 2]}], "writable": True}
+    # any JSON value, not only the lists the content kinds hold
+    content.write_json(tmp_path, "scen/centers.json", {"beds": 9})
+    assert content.read_json(tmp_path, "scen/centers.json")["data"] == {"beds": 9}
+    with pytest.raises(FileNotFoundError):
+        content.read_json(tmp_path, "scen/missing.json")
+    for bad in ("../outside.json", "/etc/passwd.json", "scen/notes.txt", "scen"):
+        with pytest.raises(content.ContentError):
+            content.write_json(tmp_path, bad, [])
+
+
+def test_referencing_finds_the_settings_that_name_a_file(tmp_path):
+    (tmp_path / "pack").mkdir()
+    (tmp_path / "pack" / "centers.json").touch()
+    (tmp_path / "personas.json").touch()
+    values = {
+        "run.scenario_options.health_centers_path": "centers.json",
+        "agent.personas_path": "personas.json",
+        "run.scenario_options.beds": 9,
+        "agent.genome": "ocean_5",
+    }
+    scenario = tmp_path / "pack"
+    assert content.referencing(tmp_path, values, scenario, "pack/centers.json") == ["run.scenario_options.health_centers_path"]
+    assert content.referencing(tmp_path, values, scenario, "personas.json") == ["agent.personas_path"]
+    # an absolute value and a core setting point from the working directory
+    values["agent.personas_path"] = str(tmp_path / "personas.json")
+    assert content.referencing(tmp_path, values, scenario, "personas.json") == ["agent.personas_path"]
+    assert content.referencing(tmp_path, values, None, "pack/centers.json") == []
+
+
 def test_rebase_paths_makes_core_content_paths_relative_to_the_preset(tmp_path):
     config = {
         "agent": {

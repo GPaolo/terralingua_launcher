@@ -41,7 +41,7 @@ The page opens at http://127.0.0.1:7000 (`--host` and `--port` change this). Bot
 
 **Artifacts tab**
 
-Artifact sets to seed at the start of a run. Each entry has a name, a type from the ones the preset's scenario knows, a payload, a cell or node, a lifespan and the type's own parameters. "In the configuration" shows the folder the current configuration names through `env.init_artifacts_path`, or through a scenario option of that name; the editor opens it, and "Save" writes it back in place when it lies under the working directory and holds at most one JSON file. The list below it shows the sets found in the folders that matter: where the setting reads them, beside the preset, and the launcher's own `launcher_content/artifacts/`. "Save as…" asks for a name and a folder, suggests those folders with the one the setting reads from first, and shows the value "Use in launch" will set. "Open…" takes the path of any set under the working directory. "Use in launch" points the setting at the set in the editor.
+Artifact sets to seed at the start of a run. Each entry has a name, a type from the ones the preset's scenario knows, a payload, a cell or node, a lifespan and the type's own parameters. "In the configuration" shows the folder the current configuration names through `env.init_artifacts_path`, or through a scenario option of that name; the editor opens it, and "Save" writes it back in place when it lies under the working directory and holds at most one JSON file. The list below it shows the sets found in the folders that matter: where the setting reads them, beside the preset, and the launcher's own `launcher_content/artifacts/`. "Save as…" asks for a name and a folder, suggests those folders with the one the setting reads from first, lets you browse the folders under the working directory, and shows the value "Use in launch" will set. "Open…" browses the working directory for a set. "Use in launch" points the setting at the set in the editor.
 
 **Personas tab**
 
@@ -49,7 +49,7 @@ Persona lists for the first beings of a run: a persona text, an optional name an
 
 **Scenario AI tab**
 
-"Current instructions" shows the file that `agent.scenario_specific_instructions` names, as it is on disk; TerraLingua renders it with Jinja at run time. Beside it, describe a scenario in plain language. A model writes the instructions text, a persona list, an artifact set and suggested settings, from the preset's settings, the current instructions and the artifact types the scenario knows. Review the result, change the text, ask for changes, then apply: the files get the chosen name in the chosen folder (the scenario's folder is suggested first, then the preset's, then `launcher_content/`, which keeps one subfolder per kind), and the Launch form gets the instructions, personas and artifacts settings and the accepted settings. The model is any name `litellm` routes, `claude-opus-5-5` by default. The key comes from the environment or the working directory's `.env`; a key typed in the page is used for one call and never stored.
+"Current instructions" is an editor for the file that `agent.scenario_specific_instructions` names, as it is on disk; TerraLingua renders it with Jinja at run time. "Save" writes it back, "Save as…" writes it where you choose, "New" starts an empty text, "Open…" loads any text file under the working directory, and "Use in launch" points the setting at the file in the editor. Beside it, describe a scenario in plain language. A model writes the instructions text, a persona list, an artifact set and suggested settings, from the preset's settings, the current instructions and the artifact types the scenario knows. Review the result, change the text, ask for changes, then apply: the files get the chosen name in the chosen folder (the scenario's folder is suggested first, then the preset's, then `launcher_content/`, which keeps one subfolder per kind), and the Launch form gets the instructions, personas and artifacts settings and the accepted settings. The model is any name `litellm` routes, `claude-opus-5-5` by default. The key comes from the environment or the working directory's `.env`; a key typed in the page is used for one call and never stored.
 
 **Console tab**
 
@@ -57,7 +57,7 @@ Launched runs and scenario tools, their status, and their live output. A tool sh
 
 ## Scenario tools
 
-A scenario may ship a viewer or an anthropologist as a subpackage with that name, runnable as `python -m <scenario>.viewer --logs <folder> --port <n>`. TerraLingua reports them for a preset. The Launch tab then shows an "Open viewer" or "Open anthropologist" button, which starts the tool with the working directory's `logs/` folder and lists it in the Console with a link to its page.
+A scenario may ship a viewer or an anthropologist as a subpackage with that name, runnable as `python -m <scenario>.viewer --logs <folder> --port <n>`. TerraLingua reports them for a preset. The Launch and Console tabs then show an "Open viewer" or "Open anthropologist" button, which starts the tool with the working directory's `logs/` folder and lists it in the Console with a link to its page.
 
 By default a tool takes any free port. When you use the launcher through a forwarded port, set the ports the tools may use in the Settings panel, for example `8990`, and forward them too.
 
